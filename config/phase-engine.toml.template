@@ -1,0 +1,76 @@
+# Phase Engine Configuration Template
+# Copy to phase-engine.toml and customize for your array
+
+[engine]
+# Virtual radio interface (upstream to hf-timestd)
+virtual_control_port = 5555
+virtual_data_address = "239.103.100.1"
+virtual_data_port = 5004
+
+# Processing parameters
+sample_rate = 24000
+buffer_seconds = 2.0
+
+# Default combination mode: mrc, egc, select, null, adaptive, manual
+default_mode = "egc"
+
+[calibration]
+# Calibration signal source
+frequency_hz = 10000000  # 10 MHz WWV
+duration_seconds = 1.0
+auto_calibrate_on_start = true
+
+# Calibration output
+save_results = true
+results_file = "/var/lib/phase-engine/calibration.json"
+
+# Array geometry for 4 antennas in L-shape
+# Positions in meters relative to reference (North antenna)
+# X = East, Y = North, Z = Up
+
+[[antennas]]
+name = "north"
+role = "reference"
+status_address = "rx888-north.local"
+data_address = "239.103.1.1"
+position = [0.0, 0.0, 0.0]
+enabled = true
+
+[[antennas]]
+name = "south"
+role = "south"
+status_address = "rx888-south.local"
+data_address = "239.103.1.2"
+position = [0.0, -20.0, 0.0]  # 20m south of reference
+enabled = true
+
+[[antennas]]
+name = "east"
+role = "east"
+status_address = "rx888-east.local"
+data_address = "239.103.1.3"
+position = [15.0, 0.0, 0.0]  # 15m east of reference
+enabled = true
+
+[[antennas]]
+name = "west"
+role = "auxiliary"
+status_address = "rx888-west.local"
+data_address = "239.103.1.4"
+position = [-15.0, 0.0, 0.0]  # 15m west of reference
+enabled = false  # Disabled by default, enable for 4-element array
+
+[adaptive]
+# Adaptive algorithm parameters
+algorithm = "mvdr"  # mvdr or lms
+diagonal_loading = 0.01
+update_rate_hz = 10
+
+[logging]
+level = "INFO"
+file = "/var/log/phase-engine/phase-engine.log"
+
+[monitoring]
+# Metrics export
+enable_metrics = true
+metrics_port = 9100
