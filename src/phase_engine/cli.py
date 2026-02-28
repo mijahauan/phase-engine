@@ -4,10 +4,66 @@ Command Line Interface for Phase Engine.
 """
 
 import sys
+import time
 import logging
 import argparse
 from pathlib import Path
 
+from .config_loader import load_config, get_engine_kwargs
+from .engine import PhaseEngine
+from .virtual_channel import VirtualChannelManager
+from .control.server import ControlServer
+from .control.loop import EgressLoop
+
+def run_daemon(args):
+    """Run the phase engine daemon."""
+    config = load_config(args.config)
+    engine_kwargs = get_engine_kwargs(config)
+    
+    engine_cfg = config.get('engine', {})
+    status_addr = engine_cfg.get('status_address', 'phase-engine-status.local')
+    control_port = engine_cfg.get('control_port', 5006)
+    
+    logger = logging.getLogger(__name__)
+    logger.info("Initializing Phase Engine Daemon...")
+    
+    engine = PhaseEngine(**engine_kwargs)
+    
+    vcm = VirtualChannelManager(engine)
+    server = ControlServer(engine, vcm, status_address=status_addr, control_port=control_port)
+    loop = EgressLoop(engine, vcm)
+    
+    try:
+        # 1. Connect to sources
+        engine.connect()
+        
+        # 2. Calibrate
+        logger.info("Running initial calibration...")
+        engine.calibrate(duration_sec=3.0)
+        
+        # 3. Start engine capture (pulls data from physical radiods)
+        engine.start()
+        
+        # 4. Start control server (listens for hf-timestd requests)
+        server.start()
+        
+        # 5. Start egress loop (pushes combined data back out)
+        loop.start()
+        
+        logger.info("Phase Engine Daemon running. Press Ctrl+C to stop.")
+        while True:
+            time.sleep(1.0)
+            
+    except KeyboardInterrupt:
+        logger.info("Shutting down...")
+    except Exception as e:
+        logger.exception(f"Fatal error in daemon: {e}")
+        sys.exit(1)
+    finally:
+        server.stop()
+        loop.stop()
+        engine.stop()
+        engine.disconnect()
 
 def main():
     """Main entry point for phase-engine command."""
@@ -57,13 +113,10 @@ def main():
         logging.getLogger().setLevel(logging.DEBUG)
     
     if args.command == 'daemon':
-        print("Phase Engine daemon not yet implemented")
-        print(f"Would load config from: {args.config}")
-        sys.exit(0)
+        run_daemon(args)
         
     elif args.command == 'calibrate':
-        print("Calibration routine not yet implemented")
-        print(f"Would calibrate at {args.frequency/1e6:.3f} MHz for {args.duration}s")
+        print("Calibration routine standalone not yet fully wired to cli")
         sys.exit(0)
         
     elif args.command == 'status':
@@ -73,7 +126,6 @@ def main():
     elif args.command == 'test':
         print("Test command not yet implemented")
         sys.exit(0)
-
 
 if __name__ == '__main__':
     main()

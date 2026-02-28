@@ -1,1 +1,3 @@
-"""Data Plane - DSP core for stream processing and coherent combination."""
+from .rtp_packetizer import RtpStreamer
+
+__all__ = ['RtpStreamer']
