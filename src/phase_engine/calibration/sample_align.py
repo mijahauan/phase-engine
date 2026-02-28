@@ -17,7 +17,7 @@ from scipy import signal
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(frozen=True)
 class CalibrationResult:
     """Result of sample alignment calibration."""
     reference_antenna: str

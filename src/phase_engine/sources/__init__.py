@@ -25,7 +25,7 @@ from .broadcasts import (
 __all__ = [
     # RadiodSource
     "RadiodSource",
-    "ChannelConfig", 
+    "ChannelConfig",
     "ChannelState",
     # Broadcasts
     "Station",

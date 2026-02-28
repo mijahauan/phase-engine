@@ -189,7 +189,7 @@ class AMStationDatabase:
             ]
             logger.info(f"Loaded {len(self.stations)} stations from cache")
             return True
-        except Exception as e:
+        except (json.JSONDecodeError, OSError) as e:
             logger.warning(f"Failed to load cache: {e}")
             return False
     
@@ -243,7 +243,7 @@ class AMStationDatabase:
             self._parse_fcc_data(content)
             return True
             
-        except Exception as e:
+        except (urllib.error.URLError, OSError) as e:
             logger.error(f"Failed to download FCC data: {e}")
             return False
     

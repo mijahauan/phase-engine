@@ -32,7 +32,7 @@ from .control import ChannelInfo
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(frozen=True)
 class StreamQuality:
     """Quality metrics for the stream."""
     completeness_pct: float = 100.0
@@ -164,8 +164,12 @@ class PhaseEngineStream:
                     # No samples available, short sleep
                     time.sleep(0.01)
                     
-            except Exception as e:
-                logger.error(f"Error in receive loop: {e}")
+            except (ValueError, TypeError, MemoryError) as e:
+                logger.error(f"Error in receive loop data processing: {e}")
+                self._gaps += 1
+                time.sleep(0.1)
+            except OSError as e:
+                logger.error(f"Network error in receive loop: {e}")
                 self._gaps += 1
                 time.sleep(0.1)
                 

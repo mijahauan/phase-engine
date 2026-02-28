@@ -18,7 +18,7 @@ from ..sources.broadcasts import Broadcast, get_station_azimuth
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(frozen=True)
 class SourceCalibration:
     """Calibration data for a single source relative to reference."""
     source_name: str
@@ -27,7 +27,7 @@ class SourceCalibration:
     amplitude_scale: float = 1.0
     
 
-@dataclass
+@dataclass(frozen=True)
 class BroadcastCombiner:
     """
     Combiner for a single broadcast.

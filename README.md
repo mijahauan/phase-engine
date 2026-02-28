@@ -45,6 +45,15 @@ sequenceDiagram
 - **DSP Combiner**: Uses the geographic location of the transmitter and the local array geometry to calculate steering vectors and combine the streams.
 - **Egress**: Packages the mathematically combined `numpy` array back into standard RTP UDP packets and pushes them to the client.
 
+## Design Philosophy: Python "Power of 10"
+
+This daemon operates in a continuous, high-throughput environment alongside physical GPSDO-locked hardware. To ensure deterministic reliability, the codebase adheres to a Python-adapted version of the "Power of 10" rules:
+
+1. **Strict Type Hinting**: Full type annotation coverage enforced via `mypy` to prevent subtle casting errors in DSP math.
+2. **No Catch-All Exceptions**: Bare `except:` blocks are forbidden. All exceptions (e.g., `OSError`, `ValueError`) are caught explicitly to prevent background threads from silently swallowing critical errors or OS signals.
+3. **Immutable Data Structures**: Control messages and configurations use `@dataclass(frozen=True)` to prevent accidental state mutation across multi-threaded data planes.
+4. **Dependency Isolation**: Strict enforcement of `venv` to prevent "floating" dependency versions (especially for NumPy/SciPy) from altering matrix solver behaviors.
+
 ## Features
 
 - **Transparent Integration**: Clients using `ka9q-python` require zero modification to use basic spatial combining. 
@@ -70,9 +79,26 @@ sequenceDiagram
 
 ## Setup & Configuration
 
-1. **Define your array geometry** in `phase-engine.toml`. Antenna positions are specified in meters relative to the phase center (ENU coordinate system).
-2. **Specify your QTH** (latitude/longitude) so the engine can accurately calculate true geographic bearings to shortwave transmitters.
-3. Start the daemon:
+**IMPORTANT: Development Requirements**
+- You MUST use a Python virtual environment (`venv`) for all development, testing, and execution.
+- Do NOT use global installations of `pip` dependencies. This project requires strict isolation to prevent conflicts with system packages or other projects.
+
+### Standard Setup
+
+1. **Create and activate a virtual environment:**
+```bash
+python3 -m venv venv
+source venv/bin/activate
+```
+
+2. **Install dependencies:**
+```bash
+pip install -e .[dev,plot]
+```
+
+3. **Define your array geometry** in `phase-engine.toml`. Antenna positions are specified in meters relative to the phase center (ENU coordinate system).
+4. **Specify your QTH** (latitude/longitude) so the engine can accurately calculate true geographic bearings to shortwave transmitters.
+5. Start the daemon:
 ```bash
 phase-engine daemon --config config/phase-engine.toml
 ```

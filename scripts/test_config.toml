@@ -1,0 +1,30 @@
+[engine]
+status_address = "239.192.152.200" # Virtual interface
+control_port = 5006
+data_port = 5004
+
+[qth]
+latitude = 39.0997
+longitude = -94.5786
+
+[[antennas]]
+name = "mock-center"
+role = "reference"
+status_address = "239.192.152.201"
+position = [0.0, 0.0, 0.0]
+enabled = true
+
+[[antennas]]
+name = "mock-north"
+status_address = "239.192.152.202"
+position = [0.0, 15.0, 0.0]
+enabled = true
+
+[[antennas]]
+name = "mock-east"
+status_address = "239.192.152.203"
+position = [15.0, 0.0, 0.0]
+enabled = true
+
+[logging]
+level = "DEBUG"

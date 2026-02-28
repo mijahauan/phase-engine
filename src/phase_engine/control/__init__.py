@@ -4,11 +4,11 @@ from .loop import EgressLoop
 from .tlv import decode_tlv_packet, StatusType
 
 __all__ = [
-    'RadioRegistry',
-    'AntennaConfig',
-    'AntennaRole',
-    'ControlServer',
-    'EgressLoop',
-    'decode_tlv_packet',
-    'StatusType'
+    "RadioRegistry",
+    "AntennaConfig",
+    "AntennaRole",
+    "ControlServer",
+    "EgressLoop",
+    "decode_tlv_packet",
+    "StatusType",
 ]

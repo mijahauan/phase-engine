@@ -66,7 +66,7 @@ class ChannelInfo:
         return self.frequency
 
 
-@dataclass
+@dataclass(frozen=True)
 class Capabilities:
     """Phase-engine capabilities."""
     backend: str = "phase-engine"

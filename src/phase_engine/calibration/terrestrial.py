@@ -18,7 +18,7 @@ from .sample_align import CalibrationResult
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(frozen=True)
 class TerrestrialCalibrationResult:
     """Result of terrestrial (geometric) calibration."""
     antenna_name: str
@@ -29,7 +29,7 @@ class TerrestrialCalibrationResult:
     confidence: float
 
 
-@dataclass 
+@dataclass(frozen=True)
 class ArrayCalibrationResult:
     """Complete array calibration from terrestrial sources."""
     results: Dict[str, TerrestrialCalibrationResult]
@@ -405,7 +405,7 @@ def run_terrestrial_calibration(
             alignment_source.frequency_khz * 1000,
             capture_duration_s * 2,  # Longer capture for better correlation
         )
-    except Exception as e:
+    except (RuntimeError, ValueError, OSError) as e:
         return ArrayCalibrationResult(
             results={},
             reference_antenna=reference_antenna,
@@ -486,7 +486,7 @@ def run_terrestrial_calibration(
             
             streams_by_source[source.call_sign] = aligned_streams
             
-        except Exception as e:
+        except (RuntimeError, ValueError, OSError) as e:
             logger.error(f"Failed to capture {source.call_sign}: {e}")
     
     # Run phase calibration
