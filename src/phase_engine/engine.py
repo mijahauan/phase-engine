@@ -22,7 +22,9 @@ from .sources import (
     FREQUENCIES_HZ,
     get_broadcasts_for_frequency,
 )
-from .combiner import PhaseCombiner, SourceCalibration
+from .config_loader import get_engine_kwargs
+from .dsp.array_geometry import AntennaArray
+from .dsp.combiner import PhaseCombiner, SourceCalibration
 from .calibration import SampleAligner
 
 logger = logging.getLogger(__name__)
@@ -93,26 +95,19 @@ class PhaseEngine:
         for i, config in enumerate(sources):
             if not config.enabled:
                 continue
-            source = RadiodSource(
-                name=config.name,
-                status_address=config.status_address,
-                ssrc_base=100000 + i * 10000,
-                default_sample_rate=sample_rate,
-            )
-            self.sources[config.name] = source
+            
+            self.sources[config.name] = RadiodSource(config.name, config.status_address)
             self.source_positions[config.name] = config.position
             
-        # Reference source
-        self.reference_source = reference_source or list(self.sources.keys())[0]
+            if reference_source is None:
+                reference_source = config.name
+                
+        self.reference_source = reference_source
         
-        # Phase combiner (created after calibration)
-        self.combiner: Optional[PhaseCombiner] = None
+        # Build DSP Array
+        self.array = AntennaArray(self.reference_source, self.source_positions)
+        self.combiner = PhaseCombiner(self.array)
         
-        # Calibration state
-        self.calibration: Optional[CalibrationResult] = None
-        self.aligner = SampleAligner(sample_rate=sample_rate)
-        
-        # Runtime state
         self._running = False
         self._lock = threading.Lock()
         
@@ -297,20 +292,24 @@ class PhaseEngine:
         
     def get_combined_samples(
         self,
-        broadcast: Broadcast,
+        virtual_channel: dict,
         max_samples: Optional[int] = None,
     ) -> Optional[np.ndarray]:
         """
-        Get combined samples for a broadcast.
+        Get combined samples for a virtual channel.
         
         Args:
-            broadcast: The broadcast to get samples for
+            virtual_channel: Virtual channel state dictionary
             max_samples: Maximum samples to return
             
         Returns:
             Combined complex sample array, or None if not available
         """
         if self.combiner is None:
+            return None
+            
+        broadcast = virtual_channel.get("broadcast")
+        if not broadcast:
             return None
             
         freq_hz = broadcast.frequency_hz
@@ -325,12 +324,62 @@ class PhaseEngine:
         if not samples:
             return None
             
-        # Combine
-        return self.combiner.combine_broadcast(
-            broadcast,
-            samples,
-            self.reference_source,
-        )
+        # Determine the combining method requested by the client
+        method = virtual_channel.get("combining_method", "mrc")
+        
+        try:
+            # We need the true geographical azimuth to the station from the array center
+            # For now, placeholder math: 0 degrees
+            # TODO: Add Geographic math to calculate true bearing to target
+            bearing_deg = 0.0
+            
+            # If the method requires spatial steering (beamform or mvdr), compute the steering vector
+            a_target = None
+            if method in ["beamform", "mvdr"]:
+                a_target = self.array.get_steering_vector(freq_hz, bearing_deg)
+                
+            combined = self.combiner.process(samples, method=method, steering_vector=a_target)
+            return combined
+            
+        except Exception as e:
+            logger.error(f"Combining failed for {broadcast.call_sign}: {e}")
+            return None
+            
+        freq_hz = broadcast.frequency_hz
+        
+        # Collect samples from all sources at this frequency
+        samples = {}
+        for name, source in self.sources.items():
+            s = source.get_samples(freq_hz, max_samples)
+            if s is not None:
+                samples[name] = s
+                
+        if not samples:
+            return None
+            
+        # Determine the physical steering target from the virtual channel config
+        # Currently, the proxy passes a generic broadcast request down.
+        # We need to compute the true steering vector for this broadcast's station.
+        
+        # Calculate steering vector for target station
+        target_station = broadcast.station
+        
+        try:
+            # We need the true geographical azimuth to the station from the array center
+            # For now, placeholder math: 0 degrees
+            # TODO: Add Geographic math to calculate true bearing to target
+            bearing_deg = 0.0
+            
+            # Use MVDR to aggressively null out other stations sharing this frequency
+            method = "mvdr" 
+            
+            a_target = self.array.get_steering_vector(freq_hz, bearing_deg)
+            combined = self.combiner.process(samples, method=method, steering_vector=a_target)
+            return combined
+            
+        except Exception as e:
+            logger.error(f"Combining failed for {broadcast.call_sign}: {e}")
+            return None
         
     def get_all_combined_samples(
         self,

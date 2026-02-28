@@ -26,16 +26,16 @@ class EgressLoop:
         logger.info("Egress data plane loop started")
         
         while self._running:
-            active_broadcasts = self.channel_manager.get_active_broadcasts()
+            active_channels = self.channel_manager.get_active_broadcasts()
             
-            if not active_broadcasts or not self.engine.is_running:
+            if not active_channels or not self.engine.is_running:
                 time.sleep(0.1)
                 continue
                 
             # For each active virtual channel, pull combined samples and stream
             # Note: We limit the max_samples here to keep latency low.
-            for ssrc, broadcast in active_broadcasts.items():
-                samples = self.engine.get_combined_samples(broadcast, max_samples=4800)
+            for ssrc, vchan in active_channels.items():
+                samples = self.engine.get_combined_samples(vchan, max_samples=4800)
                 
                 if samples is not None and len(samples) > 0:
                     streamer = self.channel_manager.get_streamer(ssrc)

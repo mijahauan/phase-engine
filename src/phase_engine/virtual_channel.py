@@ -102,11 +102,11 @@ class VirtualChannelManager:
         with self._lock:
             return self._streamers.get(ssrc)
             
-    def get_active_broadcasts(self) -> Dict[int, Any]:
-        """Returns map of SSRC -> active Broadcast object"""
+    def get_active_broadcasts(self) -> Dict[int, Dict[str, Any]]:
+        """Returns map of SSRC -> active Virtual Channel Dict"""
         with self._lock:
             return {
-                ssrc: chan["broadcast"] 
+                ssrc: chan
                 for ssrc, chan in self._channels.items() 
                 if ssrc in self._streamers and "broadcast" in chan
             }
