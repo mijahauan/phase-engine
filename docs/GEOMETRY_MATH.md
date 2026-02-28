@@ -1,5 +1,8 @@
 # Array Geometry & Beamforming Math
 
+**Date:** 2026-02-28  
+**Version:** Phase Engine v1.0.1  
+
 Phase Engine implements advanced Digital Signal Processing (DSP) to spatially filter incoming High Frequency (HF) signals. This document explains the mathematical models used to map geographic coordinates to physical phase delays, and how those delays are converted into steering vectors for Minimum Variance Distortionless Response (MVDR) beamforming.
 
 ## 1. Geographic Bearing Calculation
