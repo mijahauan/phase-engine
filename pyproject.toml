@@ -37,6 +37,9 @@ dev = [
     "black>=23.0",
     "mypy>=1.0",
 ]
+plot = [
+    "matplotlib>=3.5.0",
+]
 
 [project.scripts]
 phase-engine = "phase_engine.cli:main"

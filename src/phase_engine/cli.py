@@ -103,6 +103,15 @@ def main():
     test_parser.add_argument('--config', '-c', required=True, help='Configuration file')
     test_parser.add_argument('--debug', '-d', action='store_true', help='Enable debug logging')
     
+    # Plot command
+    plot_parser = subparsers.add_parser('plot', help='Plot theoretical array radiation pattern')
+    plot_parser.add_argument('--config', '-c', required=True, help='Configuration file (for array geometry)')
+    plot_parser.add_argument('--freq', '-f', type=float, required=True, help='Frequency in Hz')
+    plot_parser.add_argument('--method', '-m', default='focus', choices=['focus', 'mvdr', 'mrc', 'egc', 'omni'], help='Combining method')
+    plot_parser.add_argument('--target', '-t', action='append', help='Target coordinate "Name,Lat,Lon" (can be specified multiple times)')
+    plot_parser.add_argument('--null', '-n', action='append', help='Null coordinate "Name,Lat,Lon" (can be specified multiple times)')
+    plot_parser.add_argument('--out', '-o', default='pattern.png', help='Output PNG path')
+    
     args = parser.parse_args()
     
     if not args.command:
@@ -126,6 +135,41 @@ def main():
     elif args.command == 'test':
         print("Test command not yet implemented")
         sys.exit(0)
+        
+    elif args.command == 'plot':
+        try:
+            from phase_engine.dsp.plotter import PatternPlotter
+            from phase_engine.dsp.array_geometry import AntennaArray
+            from phase_engine.config_loader import load_config
+        except ImportError as e:
+            logging.error(f"Failed to import plotter dependencies. Did you install with 'pip install .[plot]'? Error: {e}")
+            sys.exit(1)
+            
+        config = load_config(args.config)
+        qth_lat = config.get('qth', {}).get('latitude', 0.0)
+        qth_lon = config.get('qth', {}).get('longitude', 0.0)
+        
+        positions = {}
+        ref_name = None
+        for ant in config.get('antennas', []):
+            positions[ant['name']] = tuple(ant.get('position', [0,0,0]))
+            if ant.get('role') == 'reference' or ref_name is None:
+                ref_name = ant['name']
+                
+        array = AntennaArray(ref_name, positions)
+        plotter = PatternPlotter(array, qth_lat, qth_lon)
+        
+        def parse_coord(coord_str):
+            parts = coord_str.split(',')
+            if len(parts) != 3:
+                raise ValueError(f"Invalid coordinate format '{coord_str}'. Expected 'Name,Lat,Lon'")
+            return {"name": parts[0], "lat": float(parts[1]), "lon": float(parts[2])}
+            
+        targets = [parse_coord(t) for t in (args.target or [])]
+        nulls = [parse_coord(n) for n in (args.null or [])]
+        
+        plotter.generate_plot(args.freq, args.method, targets, nulls, args.out)
+        print(f"Plot saved to {args.out}")
 
 if __name__ == '__main__':
     main()
