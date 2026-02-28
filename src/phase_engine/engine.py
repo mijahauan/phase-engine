@@ -328,14 +328,24 @@ class PhaseEngine:
         method = virtual_channel.get("combining_method", "mrc")
         
         try:
-            # We need the true geographical azimuth to the station from the array center
-            # For now, placeholder math: 0 degrees
-            # TODO: Add Geographic math to calculate true bearing to target
+            # Calculate true geographic bearing to the transmitter
             bearing_deg = 0.0
+            if hasattr(broadcast, 'station') and broadcast.station:
+                st_lat = broadcast.station.latitude
+                st_lon = broadcast.station.longitude
+                if st_lat != 0.0 or st_lon != 0.0:
+                    bearing_deg = calculate_bearing(
+                        self.qth_latitude, self.qth_longitude,
+                        st_lat, st_lon
+                    )
+                    logger.debug(f"Calculated bearing to {broadcast.station.name}: {bearing_deg:.1f} deg")
             
             # If the method requires spatial steering (beamform or mvdr), compute the steering vector
             a_target = None
-            if method in ["beamform", "mvdr"]:
+            if method in ["beamform", "mvdr", "null", "focus_null", "adaptive", "focus"]:
+                if method in ["focus", "focus_null"]:
+                    method = "mvdr"  # map phase-engine semantics to dsp implementations
+                
                 a_target = self.array.get_steering_vector(freq_hz, bearing_deg)
                 
             combined = self.combiner.process(samples, method=method, steering_vector=a_target)
