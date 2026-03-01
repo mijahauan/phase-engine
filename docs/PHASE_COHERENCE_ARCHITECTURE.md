@@ -25,8 +25,6 @@ Because global, startup calibration is theoretically invalid for this architectu
 3. **Whole-Block Rotation:** The cross-correlator measures the phase difference of the *entire 24 kHz passband* relative to the reference antenna. Because the software NCO phase error applies uniformly across the entire passband, determining the offset of the dominant carrier allows `phase-engine` to apply a single inverse complex weight $e^{-j\Delta\phi}$ that perfectly aligns all carriers and sub-carriers within that block.
 4. **Scintillation Filtering:** Because the target signal (e.g., WWV) is a skywave, its apparent phase scintillates due to ionospheric boiling. The `PhaseCombiner` applies statistical filtering (e.g., a long-time-constant EMA) to the cross-correlation peaks to extract the true underlying hardware NCO offset from the atmospheric noise.
 
-## Group Delay vs. Phase Delay
-This architecture explicitly assumes that the physical baseline differences (cable lengths) are small enough that the integer sample delay is zero or negligible across a 24 kHz baseband. If the array baselines grow large enough to induce fractional sample time delays across the passband, simple complex phase rotations will result in group delay distortion.
 
 ## Why Shared GPSDO is Not Enough
 It is a common misconception that disciplining all SDRs with a shared 10 MHz/27 MHz GPSDO clock guarantees phase alignment. 
