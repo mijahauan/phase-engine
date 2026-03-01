@@ -106,6 +106,7 @@ class PhaseEngine:
         reference_source: Optional[str] = None,
         sample_rate: int = 12000,
         calibration_frequency_hz: float = 900e3,
+        correlation_threshold: float = 0.15,
     ):
         """
         Initialize the PhaseEngine.
@@ -117,11 +118,13 @@ class PhaseEngine:
             reference_source: Name of reference source (default: first source)
             sample_rate: Sample rate for all channels
             calibration_frequency_hz: Frequency for calibration (strong AM station)
+            correlation_threshold: Minimum correlation score to update weights
         """
         self.qth_latitude = qth_latitude
         self.qth_longitude = qth_longitude
         self.sample_rate = sample_rate
         self.calibration_frequency_hz = calibration_frequency_hz
+        self.correlation_threshold = correlation_threshold
 
         # Create RadiodSources
         self.sources: Dict[str, RadiodSource] = {}
@@ -241,7 +244,6 @@ class PhaseEngine:
             
             # If the correlation score drops below this, we reject the update and freeze the weights
             # This prevents the array from spinning wildly when WWV fades into the noise floor
-            CORRELATION_THRESHOLD = 0.15
             
             for i, name in enumerate(self.array.antenna_names):
                 if name == self.reference_source:
@@ -259,7 +261,7 @@ class PhaseEngine:
                             freq_hz
                         )
                         
-                        if res.correlation_score >= CORRELATION_THRESHOLD:
+                        if res.correlation_score >= self.correlation_threshold:
                             # We apply the inverse phase to align the target to the reference
                             raw_weight = np.exp(-1j * res.phase_offset_rad)
                             

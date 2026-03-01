@@ -36,6 +36,7 @@ def get_engine_kwargs(config: Dict[str, Any]) -> Dict[str, Any]:
     # General engine params
     engine_cfg = config.get("engine", {})
     kwargs["sample_rate"] = engine_cfg.get("sample_rate", 12000)
+    kwargs["correlation_threshold"] = engine_cfg.get("correlation_threshold", 0.15)
 
     # Calibration freq
     cal_cfg = config.get("calibration", {})

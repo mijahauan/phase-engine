@@ -12,6 +12,12 @@ data_port = 5004
 sample_rate = 12000
 buffer_seconds = 2.0
 
+# The minimum cross-correlation score required to update array weights.
+# If the score drops below this threshold (e.g., during a deep fade), the engine freezes
+# the weights at their last known good state rather than spinning the array on noise.
+# Default is 0.15. In extremely quiet RF environments, this may need to be lowered.
+correlation_threshold = 0.15
+
 # Default reception mode: omni, focus, adaptive
 # - omni: No spatial filtering, diversity combining only
 # - focus: Auto-steer toward known stations based on frequency
