@@ -51,3 +51,16 @@ Because skywave signals fade and scintillate, a single bad correlation frame cou
 To prevent this, `phase-engine` applies an Exponential Moving Average (EMA) filter (e.g., $\alpha = 0.05$) to the complex correlation weights. 
 
 If the correlation score drops below a mathematical threshold (e.g., during a deep fade), the engine freezes the weights at their last known good state, waiting for the signal to return, rather than spinning the array based on noise.
+
+## Clock Distribution vs RF Feedline Lengths
+The physical cabling of the array falls into two entirely separate domains with different impacts on coherence:
+
+1. **The Clock Distribution (GPSDO -> RX888s):**
+The GPSDO provides the 27 MHz reference clock to the SDRs. If this clock is distributed via a splitter and cables of **identical length**, the sine wave hits the clock input pin of every ADC at the exact same picosecond. 
+This is the optimal hardware configuration. It guarantees zero integer sample delay between the SDRs and ensures they never drift over time ($\Delta\omega = 0$).
+
+2. **The RF Feedlines (Antennas -> RX888s):**
+If the coax feedline from Antenna A is 30 meters longer than the feedline from Antenna B, it introduces a physical time delay (group delay) of approximately 150 nanoseconds.
+*Does this unequal length break the beamformer?* No, because `phase-engine` processes data in extremely narrow bandwidths (e.g., 24 kHz or 12 kHz). 
+The period of a 24 kHz envelope is 41.6 microseconds. A 150 ns group delay across the feedline represents less than 0.4% of a single baseband cycle. Mathematically, this tiny fractional time delay is indistinguishable from a flat **phase shift**. 
+When the continuous cross-correlator aligns the array, the measured $\Delta\phi$ it computes is the sum of the software NCO error *and* the static physical feedline delay. By applying a single inverse complex rotation, it zeroes out both errors simultaneously. (Note: if `phase-engine` were processing a wideband 5 MHz block, unequal feedlines *would* cause destructive interference and require fractional-time FIR filters instead of simple phase rotations).
