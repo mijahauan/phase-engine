@@ -1,18 +1,62 @@
 # Phase-Engine Client Integration Guide
 
-This document describes the minimal changes required to integrate existing applications with phase-engine.
+**Date:** 2026-03-01  
+**Version:** 1.1.0
+
+This document describes how `ka9q-python` clients interact with phase-engine, covering the actual wire protocol, channel lifecycle, and multicast address assignment.
 
 ## Quick Start
 
-**Zero-code integration**: Point your app's radiod address at phase-engine instead of radiod. Phase-engine proxies all requests and applies default spatial filtering.
+**Zero-code integration**: Point your app's radiod status address at phase-engine's multicast IP instead of a physical radiod. Phase-engine proxies all `ka9q-radio` TLV commands and applies spatial beamforming transparently.
 
 ```bash
-# Before: app talks to radiod
-RADIOD_HOSTNAME=bee1-hf-status.local
+# Before: app talks directly to radiod
+RADIOD_STATUS_ADDR=bee1-status.local
 
 # After: app talks to phase-engine
-RADIOD_HOSTNAME=phase-engine-status.local
+RADIOD_STATUS_ADDR=239.99.1.1   # phase-engine status multicast IP
 ```
+
+> **Note:** `status_address` in phase-engine config must be a **multicast IP address** (e.g. `239.99.1.1`), not a hostname. `inet_aton` is used internally and rejects hostnames.
+
+---
+
+## How the Protocol Works
+
+Understanding the actual wire protocol is essential for integration. This differs from a plain `radiod` connection in one important way: **clients never supply a destination address**.
+
+### Channel Request Lifecycle
+
+```
+Client (hf-timestd / ka9q-python)          Phase Engine
+─────────────────────────────────          ────────────
+1. TLV CMD  ──────────────────────────────►  _handle_command()
+   {SSRC, FREQ, PRESET, SAMPLE_RATE}          │
+   (no destination)                           ├─ configure_channel(ssrc, params)
+                                              │   └─ _evaluate_channel(ssrc)
+                                              │       ├─ _assign_output_address(ssrc)
+                                              │       │   (deterministic 239.x.x.x)
+                                              │       └─ engine.open_channel(freq)
+                                              │           (creates channel on all radiods)
+2. TLV STATUS ACK  ◄─────────────────────────┤
+   {SSRC, OUTPUT_DATA_DEST_SOCKET}            │  (includes assigned multicast addr)
+                                              │
+3. discover_channels() ──────────────────►   │
+   (polls status multicast 239.99.1.1)        │
+                                              ├─ _status_multicaster_loop()
+4. ChannelInfo  ◄────────────────────────────┘  {SSRC, FREQ, DEST_SOCKET, SAMPRATE}
+
+5. RadiodStream subscribes to
+   assigned multicast address
+   and receives combined RTP IQ
+```
+
+### Key Design Points
+
+- **Clients never send `OUTPUT_DATA_DEST_SOCKET`** — phase-engine ignores it if present. The output address is always assigned by phase-engine.
+- **Deterministic multicast addresses** — the same SSRC always maps to the same `239.x.x.x` group (SHA-256 of SSRC bytes). Restart-safe.
+- **Lazy physical channel allocation** — `open_channel()` is only called when a client sends a frequency request. On startup, phase-engine calibrates and then sits idle.
+- **SSRC `0xFFFFFFFF`** is a broadcast discovery probe from `ka9q` tools. Phase-engine silently ignores it.
 
 ---
 
@@ -24,51 +68,41 @@ Edit `config/timestd-config.toml`:
 
 ```toml
 [ka9q]
-# Point to phase-engine instead of radiod
-status_address = "phase-engine-status.local"
-
-# Already exists - tells hf-timestd to expect 17 channels (one per broadcast)
-source = "phase-engine"
+# Point to phase-engine status multicast IP (must be an IP, not a hostname)
+status_address = "239.99.1.1"
 ```
 
-**That's it.** Phase-engine will:
-1. Accept channel requests from hf-timestd
-2. Auto-compute beam azimuth from frequency → station mapping
-3. Apply FOCUS mode toward the target station
-4. Return combined IQ stream
+**That's it.** `hf-timestd` via `ka9q-python` will:
+1. Send `{SSRC, FREQ, PRESET, SAMPLE_RATE}` TLV CMD to port 5006
+2. Receive STATUS ACK with the assigned `OUTPUT_DATA_DEST_SOCKET`
+3. Alternatively call `discover_channels()` which polls the status multicast
+4. Subscribe the `RadiodStream` to the assigned multicast address
+
+Do **not** pass a `destination` kwarg to `create_channel()` — phase-engine does not accept it from clients.
 
 ### Enhanced Integration (Optional)
 
-To pass explicit reception objectives, modify `src/hf_timestd/core/stream_recorder_v2.py`:
+To pass explicit spatial processing hints, add `reception_mode` and `target` to the `create_channel()` call in `src/hf_timestd/core/stream_recorder_v2.py`:
 
 ```python
-# In _create_channel() method, around line 368
-
-# Check if we have phase-engine capabilities
-caps = self._control.get_capabilities() if hasattr(self._control, 'get_capabilities') else {}
-
 kwargs = {
     "frequency_hz": float(self.config.frequency_hz),
     "preset": self.config.preset,
     "sample_rate": self.config.sample_rate,
     "agc_enable": self.config.agc_enable,
     "gain": self.config.gain,
-    "destination": self.config.destination,
+    # NOTE: do NOT pass destination= here
     "encoding": self.config.encoding,
     "timeout": 10.0,
-    "frequency_tolerance": 1.0
 }
 
-# Add phase-engine extensions if available
-if caps.get("backend") == "phase-engine":
-    # BroadcastRegistry already computed beam_azimuth_deg
-    if hasattr(self.config, 'beam_azimuth_deg') and self.config.beam_azimuth_deg is not None:
-        kwargs["reception_mode"] = "focus"
-        kwargs["target"] = self.config.beam_azimuth_deg
-    
-    # For shared frequencies, use adaptive nulling
-    if hasattr(self.config, 'requires_discrimination') and self.config.requires_discrimination:
-        kwargs["reception_mode"] = "adaptive"
+# Add phase-engine spatial extensions if desired
+if hasattr(self.config, 'beam_azimuth_deg') and self.config.beam_azimuth_deg is not None:
+    kwargs["reception_mode"] = "focus"
+    kwargs["target"] = self.config.beam_azimuth_deg
+
+if hasattr(self.config, 'requires_discrimination') and self.config.requires_discrimination:
+    kwargs["reception_mode"] = "adaptive"
 
 self.channel_info = self._control.ensure_channel(**kwargs)
 ```
@@ -77,8 +111,8 @@ self.channel_info = self._control.ensure_channel(**kwargs)
 
 | File | Change | Lines |
 |------|--------|-------|
-| `config/timestd-config.toml` | Update `status_address` | 1 |
-| `core/stream_recorder_v2.py` | Optional: pass reception objectives | ~15 |
+| `config/timestd-config.toml` | Update `status_address` to multicast IP | 1 |
+| `core/stream_recorder_v2.py` | Optional: pass reception objectives | ~10 |
 
 ---
 
@@ -90,10 +124,10 @@ Edit `.radiod-hostname` or set environment variable:
 
 ```bash
 # Option 1: Edit config file
-echo "phase-engine-status.local" > .radiod-hostname
+echo "239.99.1.1" > .radiod-hostname
 
 # Option 2: Environment variable
-export RADIOD_HOSTNAME=phase-engine-status.local
+export RADIOD_HOSTNAME=239.99.1.1
 ```
 
 **That's it.** SWL-ka9q will work unchanged, with phase-engine applying default spatial filtering.
@@ -264,38 +298,65 @@ def create_channel_smart(control, frequency_hz, preset, sample_rate,
 
 ---
 
+## TLV Wire Format Reference
+
+Phase-engine speaks standard `ka9q-radio` TLV. The relevant type codes:
+
+| Constant | Value | Description |
+|---|---|---|
+| `EOL` | 0 | End of TLV list |
+| `COMMAND_TAG` | 1 | Echo tag for ACK matching |
+| `OUTPUT_DATA_DEST_SOCKET` | 17 | AF(2) \| port(2) \| IPv4(4) — **assigned by phase-engine, not client** |
+| `OUTPUT_SSRC` | 18 | Channel SSRC (client-allocated via `allocate_ssrc()`) |
+| `OUTPUT_SAMPRATE` | 20 | Sample rate in Hz |
+| `RADIO_FREQUENCY` | 33 | Center frequency as 64-bit double (Hz) |
+| `DEMOD_TYPE` | 48 | Demodulator type (0 = IQ) |
+| `PRESET` | 68 | Preset name string (NUL-terminated) |
+| `OUTPUT_ENCODING` | 85 | Sample encoding (26993 = F32) |
+
+Socket address encoding (`OUTPUT_DATA_DEST_SOCKET`, 8 bytes):
+```
+byte 0-1: AF_INET (big-endian uint16, = 2)
+byte 2-3: port    (big-endian uint16)
+byte 4-7: IPv4    (4 bytes, inet_aton format)
+```
+
+---
+
 ## Testing Integration
 
-### Verify Phase-Engine Connection
+### Verify Phase-Engine is Running
 
-```python
-from phase_engine import PhaseEngineControl
+```bash
+# Check service status
+sudo systemctl status phase-engine
 
-control = PhaseEngineControl("phase-engine-status.local")
-caps = control.get_capabilities()
-
-print(f"Backend: {caps['backend']}")
-print(f"Antennas: {caps['n_antennas']}")
-print(f"DoF: {caps['dof']}")
-print(f"Modes: {caps['modes']}")
+# Tail logs - should show "idle, waiting for client requests" after calibration
+sudo journalctl -u phase-engine -f
 ```
 
 ### Test Channel Creation
 
 ```python
-# Standard (works with radiod or phase-engine)
-ch = control.create_channel(frequency_hz=10000000, preset="iq", sample_rate=24000)
-print(f"SSRC: {ch.ssrc}, Address: {ch.multicast_address}")
+from ka9q import RadiodControl
 
-# Enhanced (phase-engine only, ignored by radiod)
-ch = control.create_channel(
-    frequency_hz=10000000,
-    preset="iq", 
-    sample_rate=24000,
-    reception_mode="focus",
-    target="WWV"
-)
-print(f"Beam azimuth: {ch.beam_azimuth_deg}°")
+# Connect to phase-engine status multicast
+control = RadiodControl("239.99.1.1")
+
+# Standard ka9q-python channel creation — no destination kwarg
+ssrc = control.allocate_ssrc(frequency_hz=10e6, preset="iq", sample_rate=24000)
+channel_info = control.ensure_channel(ssrc)
+
+print(f"SSRC: {ssrc}")
+print(f"Assigned multicast: {channel_info.multicast_address}:{channel_info.port}")
+```
+
+After this call, phase-engine logs will show:
+```
+open_channel: longwire opened 10.000 MHz
+open_channel: T3FD opened 10.000 MHz
+open_channel: west opened 10.000 MHz
+Starting virtual stream for SSRC <n> at 10000000.0 Hz -> 239.x.x.x:5004
 ```
 
 ---

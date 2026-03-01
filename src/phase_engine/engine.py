@@ -279,23 +279,68 @@ class PhaseEngine:
 
         logger.info(f"Created {len(FREQUENCIES_HZ)} channels on {len(self.sources)} sources")
 
+    def open_channel(self, frequency_hz: float) -> None:
+        """
+        Lazily open a physical channel at the requested frequency on all sources.
+
+        Called by VirtualChannelManager when a client (e.g. hf-timestd via
+        ka9q-python) sends a TLV CMD requesting a frequency.  Creates the
+        channel on every connected RadiodSource and starts capture so that
+        combined samples are available for the egress loop.
+
+        Args:
+            frequency_hz: Center frequency in Hz
+
+        Raises:
+            RuntimeError: If not yet calibrated, or no sources are connected
+        """
+        if self.combiner is None:
+            raise RuntimeError("Cannot open channel: engine is not calibrated")
+
+        with self._lock:
+            for name, source in self.sources.items():
+                if not source.is_connected:
+                    logger.warning(f"open_channel: source {name} not connected, skipping")
+                    continue
+                try:
+                    if frequency_hz in source.frequencies:
+                        logger.debug(f"open_channel: {name} already has {frequency_hz/1e6:.3f} MHz")
+                        continue
+                    source.create_channel(frequency_hz, sample_rate=self.sample_rate)
+                    source.start_capture([frequency_hz])
+                    logger.info(f"open_channel: {name} opened {frequency_hz/1e6:.3f} MHz")
+                except (RuntimeError, OSError) as e:
+                    logger.error(f"open_channel: {name} failed at {frequency_hz/1e6:.3f} MHz: {e}")
+
+    def close_channel(self, frequency_hz: float) -> None:
+        """
+        Close the physical channel at the given frequency on all sources.
+
+        Called by VirtualChannelManager when a virtual channel is removed.
+
+        Args:
+            frequency_hz: Center frequency in Hz
+        """
+        with self._lock:
+            for name, source in self.sources.items():
+                if not source.is_connected:
+                    continue
+                try:
+                    source.remove_channel(frequency_hz)
+                    logger.info(f"close_channel: {name} closed {frequency_hz/1e6:.3f} MHz")
+                except (RuntimeError, OSError) as e:
+                    logger.warning(f"close_channel: {name} failed at {frequency_hz/1e6:.3f} MHz: {e}")
+
     def start(self) -> None:
-        """Start continuous capture on all broadcast frequencies."""
+        """Start the engine and wait for client requests."""
         if self._running:
             return
 
         if self.combiner is None:
             raise RuntimeError("Must calibrate before starting")
 
-        # Create channels if not already done
-        self.create_broadcast_channels()
-
-        # Start capture on all sources
-        for source in self.sources.values():
-            source.start_capture(FREQUENCIES_HZ)
-
         self._running = True
-        logger.info("PhaseEngine started")
+        logger.info("PhaseEngine started (idle, waiting for client requests)")
 
     def stop(self) -> None:
         """Stop continuous capture."""
@@ -326,11 +371,9 @@ class PhaseEngine:
         if self.combiner is None:
             return None
 
-        broadcast = virtual_channel.get("broadcast")
-        if not broadcast:
+        freq_hz = virtual_channel.get("frequency_hz")
+        if not freq_hz:
             return None
-
-        freq_hz = broadcast.frequency_hz
 
         # Collect samples from all sources at this frequency
         samples = {}
@@ -346,32 +389,22 @@ class PhaseEngine:
         method = virtual_channel.get("combining_method", "mrc")
 
         try:
-            # Calculate true geographic bearing to the transmitter
-            bearing_deg = 0.0
-            if hasattr(broadcast, "station") and broadcast.station:
-                st_lat = broadcast.station.latitude
-                st_lon = broadcast.station.longitude
-                if st_lat != 0.0 or st_lon != 0.0:
-                    bearing_deg = calculate_bearing(
-                        self.qth_latitude, self.qth_longitude, st_lat, st_lon
-                    )
-                    logger.debug(
-                        f"Calculated bearing to {broadcast.station.name}: {bearing_deg:.1f} deg"
-                    )
+            # If the client supplied an explicit bearing use it; otherwise default to 0.0.
+            # Spatial steering methods (beamform/mvdr) require a valid bearing; without one
+            # they fall back to MRC so combining still works even for unknown transmitters.
+            bearing_deg = virtual_channel.get("bearing_deg", 0.0)
 
-            # If the method requires spatial steering (beamform or mvdr), compute the steering vector
             a_target = None
             if method in ["beamform", "mvdr", "null", "focus_null", "adaptive", "focus"]:
                 if method in ["focus", "focus_null"]:
-                    method = "mvdr"  # map phase-engine semantics to dsp implementations
-
+                    method = "mvdr"
                 a_target = self.array.get_steering_vector(freq_hz, bearing_deg)
 
             combined = self.combiner.process(samples, method=method, steering_vector=a_target)
             return combined
 
         except (ValueError, np.linalg.LinAlgError) as e:
-            logger.error(f"Combining failed for {broadcast.call_sign}: {e}")
+            logger.error(f"Combining failed for SSRC {virtual_channel.get('ssrc')} at {freq_hz/1e6:.3f} MHz: {e}")
             return None
 
     def get_all_combined_samples(

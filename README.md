@@ -1,7 +1,7 @@
 # Phase Engine
 
-**Date:** 2026-02-28  
-**Version:** 1.0.1  
+**Date:** 2026-03-01  
+**Version:** 1.1.0  
 
 **Phase Engine** is a high-performance middleware daemon that transforms an array of independent `ka9q-radio` SDR receivers into a coherent, steerable phased array. 
 
@@ -37,8 +37,8 @@ sequenceDiagram
 ```
 
 ### The Control Plane (The Proxy)
-- **Status Multicaster**: Broadcasts fake JSON status packets on port `5006` so clients auto-discover `phase-engine` as an available radio.
-- **TLV Server**: Listens for standard `ka9q-radio` commands. When it receives a request, it maps it to an internal "Virtual Channel" and passes the raw frequency requests down to the physical `radiod` cluster.
+- **Status Multicaster**: Broadcasts binary TLV status packets on a configurable multicast group (default `239.99.1.1`) so `ka9q-python` clients can `discover_channels()` and learn the assigned output stream address.
+- **TLV Server**: Listens for standard `ka9q-radio` CMD packets on UDP port 5006. When a client sends `{SSRC, FREQ, PRESET, SAMPLE_RATE}`, the engine assigns a deterministic output multicast address (derived from SSRC), lazily opens physical channels on all radiod sources, and echoes the assigned address back in the STATUS ACK. Clients never supply a destination address — phase-engine always assigns it.
 
 ### The Data Plane (DSP & Egress)
 - **Ingress**: Pulls raw `complex64` RTP streams from the physical radios.
@@ -82,6 +82,8 @@ This daemon operates in a continuous, high-throughput environment alongside phys
 **IMPORTANT: Development Requirements**
 - You MUST use a Python virtual environment (`venv`) for all development, testing, and execution.
 - Do NOT use global installations of `pip` dependencies. This project requires strict isolation to prevent conflicts with system packages or other projects.
+
+> **Note:** `status_address` in `config/phase-engine.toml` must be a multicast IP (e.g. `239.99.1.1`), not a hostname. Hostnames are rejected by the internal socket layer.
 
 ### Standard Setup
 

@@ -6,6 +6,7 @@ independently. Multiple RadiodSources can be combined by the phase-engine
 for coherent array processing.
 """
 
+import hashlib
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Callable
 import numpy as np
@@ -66,7 +67,7 @@ class RadiodSource:
         self,
         name: str,
         status_address: str,
-        ssrc_base: int = 100000,
+        ssrc_base: int = None,
         default_sample_rate: int = 12000,
         default_encoding: int = 4,  # F32
     ):
@@ -76,12 +77,19 @@ class RadiodSource:
         Args:
             name: Human-readable name for this source (e.g., "bee1")
             status_address: radiod status multicast address (e.g., "bee1-status.local")
-            ssrc_base: Base SSRC for channels created by this source
+            ssrc_base: Base SSRC for channels created by this source.
+                       If None, derived from a hash of the source name so each
+                       source gets a unique, stable SSRC range.
             default_sample_rate: Default sample rate for new channels
             default_encoding: Default encoding (4 = F32)
         """
         self.name = name
         self.status_address = status_address
+        # Derive a unique base from the source name so that multiple RadiodSources
+        # never collide on the same SSRC even when they all start at counter=0.
+        if ssrc_base is None:
+            h = int.from_bytes(hashlib.sha256(name.encode()).digest()[:4], "big")
+            ssrc_base = (h & 0x7FFF0000) | 0x00010000  # upper 15 bits of hash, min 65536
         self.ssrc_base = ssrc_base
         self.default_sample_rate = default_sample_rate
         self.default_encoding = default_encoding

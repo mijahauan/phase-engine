@@ -4,7 +4,7 @@
 [engine]
 # Virtual radio interface (upstream to hf-timestd and other clients)
 # Clients connect to this address to use phase-engine as a radiod replacement
-status_address = "phase-engine-status.local"
+status_address = "239.99.1.1"
 control_port = 5006
 data_port = 5004
 

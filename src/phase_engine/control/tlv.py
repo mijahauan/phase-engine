@@ -29,6 +29,7 @@ class StatusType:
     OUTPUT_SAMPRATE = 20
 
     RADIO_FREQUENCY = 33
+    DEMOD_TYPE = 48
 
     AGC_ENABLE = 52
     GAIN = 56
@@ -36,8 +37,7 @@ class StatusType:
     OUTPUT_SAMPLES = 58
 
     PRESET = 68
-
-    OUTPUT_ENCODING = 82
+    OUTPUT_ENCODING = 85
 
 
 def decode_tlv_packet(buffer: bytes) -> Dict[Any, Any]:
@@ -99,9 +99,10 @@ def decode_tlv_packet(buffer: bytes) -> Dict[Any, Any]:
             val = data.decode("utf-8", errors="ignore")
         # Sockets
         elif type_val in (StatusType.OUTPUT_DATA_DEST_SOCKET, StatusType.STATUS_DEST_SOCKET):
-            if optlen >= 6:
-                ip = socket.inet_ntoa(data[:4])
-                port = struct.unpack(">H", data[4:6])[0]
+            # Wire format: AF_INET (2 bytes) | port (2 bytes) | IPv4 (4 bytes)
+            if optlen >= 8:
+                port = struct.unpack(">H", data[2:4])[0]
+                ip = socket.inet_ntoa(data[4:8])
                 val = f"{ip}:{port}"
         # Default Integer
         else:

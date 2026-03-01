@@ -101,35 +101,58 @@ class ControlServer:
     def _handle_command(self, tlv: dict, addr: tuple):
         """Map TLV commands to engine actions."""
         ssrc = tlv.get(StatusType.OUTPUT_SSRC)
-        logger.info(f"Control server received CMD: {tlv}")
-        if not ssrc:
+
+        # SSRC 0xFFFFFFFF is a broadcast discovery probe from ka9q tools — ignore silently.
+        if not ssrc or ssrc == 0xFFFFFFFF:
             return
+
+        logger.info(f"Control server received CMD: {tlv}")
 
         freq = tlv.get(StatusType.RADIO_FREQUENCY)
         preset = tlv.get(StatusType.PRESET)
-        dest_sock = tlv.get(StatusType.OUTPUT_DATA_DEST_SOCKET)
         cmd_tag = tlv.get(StatusType.COMMAND_TAG)
         rate = tlv.get(StatusType.OUTPUT_SAMPRATE)
+        demod_type = tlv.get(StatusType.DEMOD_TYPE)
+        encoding = tlv.get(StatusType.OUTPUT_ENCODING)
 
-        # Update the virtual channel configuration
+        # NOTE: clients (hf-timestd via ka9q-python) do NOT send a destination.
+        # We never accept OUTPUT_DATA_DEST_SOCKET from the client; instead we assign
+        # our own deterministic output multicast address inside configure_channel().
         params = {}
         if freq is not None:
             params["frequency_hz"] = freq
         if preset is not None:
             params["preset"] = preset
-        if dest_sock is not None:
-            params["destination"] = dest_sock
         if rate is not None:
             params["sample_rate"] = rate
+        if demod_type is not None:
+            params["demod_type"] = demod_type
+        if encoding is not None:
+            params["encoding"] = encoding
 
         if params:
             self.channel_manager.configure_channel(ssrc, params)
 
-        # Send STATUS ACK back to the requester
-        self._send_status_ack(ssrc, cmd_tag, addr)
+        # Retrieve the assigned destination so we can echo it back in the ACK.
+        # After configure_channel() the channel dict will have "destination" set.
+        assigned_dest = None
+        channels = self.channel_manager.get_channels()
+        for chan in channels:
+            if chan.get("ssrc") == ssrc:
+                assigned_dest = chan.get("destination")
+                break
 
-    def _send_status_ack(self, ssrc: int, cmd_tag: int, addr: tuple):
-        """Send a basic TLV status packet back to acknowledge the command."""
+        # Send STATUS ACK back to the requester (includes our assigned multicast addr)
+        self._send_status_ack(ssrc, cmd_tag, addr, assigned_dest)
+
+    def _send_status_ack(self, ssrc: int, cmd_tag: int, addr: tuple, assigned_dest: str = None):
+        """
+        Send a TLV status packet back to acknowledge the command.
+
+        Includes the engine-assigned output multicast address (OUTPUT_DATA_DEST_SOCKET)
+        so that ka9q-python's ensure_channel() / discover_channels() can immediately
+        learn where to subscribe for the combined RTP stream.
+        """
         import struct
 
         resp = bytearray([0])  # STATUS packet
@@ -140,6 +163,20 @@ class ControlServer:
 
         resp.extend(bytes([StatusType.OUTPUT_SSRC, 4]))
         resp.extend(struct.pack(">I", ssrc))
+
+        # Encode our assigned output multicast address so the client knows where
+        # to subscribe.  Format: AF_INET (2 bytes) + port (2 bytes) + IPv4 (4 bytes)
+        if assigned_dest:
+            try:
+                dest_parts = assigned_dest.split(":")
+                dest_ip = dest_parts[0]
+                dest_port = int(dest_parts[1]) if len(dest_parts) > 1 else 5004
+                resp.extend(bytes([StatusType.OUTPUT_DATA_DEST_SOCKET, 8]))
+                resp.extend(struct.pack(">H", socket.AF_INET))
+                resp.extend(struct.pack(">H", dest_port))
+                resp.extend(socket.inet_aton(dest_ip))
+            except (OSError, ValueError) as e:
+                logger.debug(f"Could not encode destination in ACK: {e}")
 
         resp.extend(bytes([StatusType.EOL]))
 
@@ -155,54 +192,44 @@ class ControlServer:
         while self._running:
             try:
                 for chan in self.channel_manager.get_channels():
+                    # Only advertise channels that are fully active (have freq + destination)
+                    ssrc = chan.get("ssrc")
+                    freq = chan.get("frequency_hz")
+                    dest = chan.get("destination")
+                    if not ssrc or not freq or not dest:
+                        continue
+
                     buf = bytearray()
                     buf.append(0)  # Packet Type: STATUS
 
-                    # 18: OUTPUT_SSRC
-                    ssrc = chan.get("ssrc", 0)
-                    ssrc_bytes = ssrc.to_bytes(4, byteorder="big").lstrip(b"\x00")
-                    if not ssrc_bytes:
-                        buf.extend([18, 0])
-                    else:
-                        buf.extend([18, len(ssrc_bytes)])
-                        buf.extend(ssrc_bytes)
+                    # OUTPUT_SSRC
+                    buf.extend([StatusType.OUTPUT_SSRC, 4])
+                    buf.extend(struct.pack(">I", ssrc))
 
-                    # 1: FREQ
-                    freq = chan.get("frequency_hz", 10e6)
-                    buf.extend([1, 8])
+                    # RADIO_FREQUENCY
+                    buf.extend([StatusType.RADIO_FREQUENCY, 8])
                     buf.extend(struct.pack(">d", freq))
 
-                    # 2: PRESET
-                    preset = chan.get("preset", "iq").encode("utf-8") + b"\x00"
-                    buf.extend([2, len(preset)])
-                    buf.extend(preset)
+                    # PRESET
+                    preset_bytes = chan.get("preset", "iq").encode("utf-8") + b"\x00"
+                    buf.extend([StatusType.PRESET, len(preset_bytes)])
+                    buf.extend(preset_bytes)
 
-                    # 3: SAMPLE_RATE
-                    sr = chan.get("sample_rate", self.engine.sample_rate)
-                    if sr is None:
-                        sr = self.engine.sample_rate
-                    sr_bytes = sr.to_bytes(4, byteorder="big").lstrip(b"\x00")
-                    if not sr_bytes:
-                        buf.extend([3, 0])
-                    else:
-                        buf.extend([3, len(sr_bytes)])
-                        buf.extend(sr_bytes)
+                    # OUTPUT_SAMPRATE
+                    sr = chan.get("sample_rate") or self.engine.sample_rate
+                    buf.extend([StatusType.OUTPUT_SAMPRATE, 4])
+                    buf.extend(struct.pack(">I", sr))
 
-                    # 17: DEST_SOCKET
-                    dest = chan.get("destination", "127.0.0.1:5004")
-                    ip = dest.split(":")[0] if ":" in dest else dest
-                    port = int(dest.split(":")[1]) if ":" in dest else 5004
-                    buf.extend([17, 8])
+                    # OUTPUT_DATA_DEST_SOCKET — the engine-assigned output multicast address.
+                    # This is what ka9q-python's discover_channels() reads to subscribe.
+                    dest_ip = dest.split(":")[0] if ":" in dest else dest
+                    dest_port = int(dest.split(":")[1]) if ":" in dest else 5004
+                    buf.extend([StatusType.OUTPUT_DATA_DEST_SOCKET, 8])
                     buf.extend(struct.pack(">H", socket.AF_INET))
-                    buf.extend(struct.pack(">H", port))
-                    buf.extend(socket.inet_aton(ip))
+                    buf.extend(struct.pack(">H", dest_port))
+                    buf.extend(socket.inet_aton(dest_ip))
 
-                    # 21: RTP_DEST string fallback
-                    dest_bytes = dest.encode("utf-8") + b"\x00"
-                    buf.extend([21, len(dest_bytes)])
-                    buf.extend(dest_bytes)
-
-                    buf.extend([0, 0])  # EOL
+                    buf.extend([StatusType.EOL, 0])
 
                     self._status_sock.sendto(buf, (self.status_address, 5006))
 
