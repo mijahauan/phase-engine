@@ -9,7 +9,7 @@ Coordinates:
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 import math
 import logging
 import threading
@@ -64,6 +64,25 @@ class CalibrationResult:
     correlation_coefficients: Dict[str, float]  # source_name -> correlation
     calibration_frequency_hz: float
     timestamp: float
+
+    def to_dict(self) -> dict:
+        def clean_val(v):
+            if isinstance(v, (np.integer, int)):
+                return int(v)
+            if isinstance(v, (np.floating, float)):
+                if math.isnan(v):
+                    return None
+                return float(v)
+            return v
+
+        return {
+            "reference_source": self.reference_source,
+            "source_delays": {k: clean_val(v) for k, v in self.source_delays.items()},
+            "source_phases": {k: clean_val(v) for k, v in self.source_phases.items()},
+            "correlation_coefficients": {k: clean_val(v) for k, v in self.correlation_coefficients.items()},
+            "calibration_frequency_hz": clean_val(self.calibration_frequency_hz),
+            "timestamp": clean_val(self.timestamp),
+        }
 
 
 class PhaseEngine:

@@ -7,6 +7,7 @@ import sys
 import time
 import logging
 import argparse
+import json
 from pathlib import Path
 
 from .config_loader import load_config, get_engine_kwargs
@@ -40,7 +41,17 @@ def run_daemon(args):
 
         # 2. Calibrate
         logger.info("Running initial calibration...")
-        engine.calibrate(duration_sec=3.0)
+        cal_result = engine.calibrate(duration_sec=3.0)
+        
+        if cal_result:
+            try:
+                state_dir = Path("/var/lib/phase-engine")
+                state_dir.mkdir(parents=True, exist_ok=True)
+                with open(state_dir / "calibration_result.json", "w") as f:
+                    json.dump(cal_result.to_dict(), f, indent=2)
+                logger.info(f"Exported calibration results to {state_dir}/calibration_result.json")
+            except Exception as e:
+                logger.warning(f"Failed to export calibration results: {e}")
 
         # 3. Start engine capture (pulls data from physical radiods)
         engine.start()
