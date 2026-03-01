@@ -62,3 +62,19 @@ If the coax feedline from Antenna A is 30 meters longer than the feedline from A
 *Does this unequal length break the beamformer?* No, because `phase-engine` processes data in extremely narrow bandwidths (e.g., 24 kHz or 12 kHz). 
 The period of a 24 kHz envelope is 41.6 microseconds. A 150 ns group delay across the feedline represents less than 0.4% of a single baseband cycle. Mathematically, this tiny fractional time delay is indistinguishable from a flat **phase shift**. 
 When the continuous cross-correlator aligns the array, the measured $\Delta\phi$ it computes is the sum of the software NCO error *and* the static physical feedline delay. By applying a single inverse complex rotation, it zeroes out both errors simultaneously. (Note: if `phase-engine` were processing a wideband 5 MHz block, unequal feedlines *would* cause destructive interference and require fractional-time FIR filters instead of simple phase rotations).
+
+## Physical Antenna Diversity vs. Phased Arrays
+The physical nature of the array elements radically changes the DSP strategy required. 
+
+In a traditional **Phased Array**, all antenna elements are physically identical (e.g., a grid of identical vertical whips), have identical polarization, and identical ambient noise floors. In this scenario, combining the signals using Equal Gain Combining (EGC) produces the expected $+10\log_{10}(N)$ gain (e.g., +4.7 dB for 3 antennas) while synthetically steering a null or beam lobe.
+
+However, if the array consists of physically distinct antennas (e.g., a random longwire, a Terminated Folded Dipole, and a vertical dipole), it constitutes a **Diversity Array**.
+1. **Gain and Noise Mismatch:** A highly efficient longwire might yield a signal physically 20 dB stronger than a lossy T3FD, but both might share a similar ambient noise floor. Adding them straight across (EGC) would actually *degrade* the array SNR because the weak antenna injects pure noise.
+2. **Polarization Diversity:** A horizontal wire and a vertical dipole react entirely differently to the changing polarization of ionospheric skywaves (Faraday rotation). When the horizontal wire enters a deep fade, the vertical dipole often spikes in strength.
+
+### Noise-Normalized Maximum Ratio Combining (MRC)
+To optimally exploit a Diversity Array, `phase-engine` utilizes Noise-Normalized Maximum Ratio Combining.
+Instead of adding the antennas equally, the DSP calculates an optimal weight for each element: $W_i \propto \frac{S_i}{N_i^2}$, where $S$ is signal voltage and $N^2$ is noise variance.
+* When one antenna overwhelmingly dominates (e.g., the longwire on a steady day), the algorithm assigns it ~99% weight, effectively disabling the weaker, noisier antennas to protect the SNR.
+* When a polarization fade kills the primary antenna, the continuous alignment algorithm instantaneously detects the SNR shift and transfers the weighting to the vertical antenna that caught the fading wave.
+* Thus, for a physically diverse array, the primary benefit of coherence is not raw theoretical beamforming gain, but absolute **fade mitigation** and continuous signal continuity.

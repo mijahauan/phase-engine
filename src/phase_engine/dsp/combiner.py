@@ -37,8 +37,14 @@ class PhaseCombiner:
 
     def _apply_calibration(self, samples_matrix: np.ndarray) -> np.ndarray:
         """Apply static calibration before adaptive processing."""
+        # Clean the matrix of any extreme/garbage UDP values that would blow up x^2 math
+        clean_matrix = np.nan_to_num(samples_matrix, nan=0.0, posinf=0.0, neginf=0.0)
+        # Clip to a reasonable maximum voltage limit to prevent float32 overflow when squared
+        np.clip(clean_matrix.real, -10.0, 10.0, out=clean_matrix.real)
+        np.clip(clean_matrix.imag, -10.0, 10.0, out=clean_matrix.imag)
+        
         # Multiply each row (antenna) by its calibration weight
-        return samples_matrix * self.calibration_weights[:, np.newaxis]
+        return clean_matrix * self.calibration_weights[:, np.newaxis]
 
     def _map_samples_to_matrix(
         self, samples_dict: Dict[str, np.ndarray]
@@ -153,6 +159,16 @@ class PhaseCombiner:
         w = w / np.sqrt(self.array.n_elements)
         return w
 
+    def _normalize_weights(self, weights: List[float]) -> np.ndarray:
+        """
+        Normalize weights to prevent power explosion.
+        """
+        weights = np.array(weights)
+        norm = np.linalg.norm(weights)
+        if norm < 1e-15 or np.isnan(norm) or np.isinf(norm):
+            return np.ones_like(weights) / np.sqrt(len(weights))
+        return weights / norm
+
     def _calc_mrc_weights(self, X: np.ndarray) -> np.ndarray:
         """
         Maximum Ratio Combining (MRC): Weight by both phase alignment and SNR.
@@ -161,18 +177,18 @@ class PhaseCombiner:
         ref_signal = X[0, :]
         cross_corr = np.mean(X * ref_signal.conj(), axis=1)
 
-        # Weight vector is proportional to the channel estimate (cross correlation)
-        # w = h
-        w = cross_corr
+        # Calculate noise power
+        noise_power = np.mean(np.abs(X) ** 2, axis=1)
+        # Prevent division by zero if samples are completely flat/dead
+        noise_power = np.maximum(noise_power, 1e-20)
 
-        # Normalize power to preserve unit gain
-        norm = np.linalg.norm(w)
-        if norm > 0:
-            w = w / norm
-        else:
-            w = self._calc_selection_weights(X)
+        # Calculate weights
+        weights = np.abs(cross_corr) / noise_power
 
-        return w
+        # Normalize weights
+        weights = self._normalize_weights(weights)
+
+        return weights
 
     def _calc_beamform_weights(self, steering_vector: np.ndarray) -> np.ndarray:
         """
