@@ -148,8 +148,11 @@ class PhaseEngine:
 
         # Cross-correlation aligner
         from .dsp.alignment import CrossCorrelator
-
         self.aligner = CrossCorrelator(sample_rate)
+        
+        # Track smoothed calibration weights per channel (frequency -> dict[antenna -> complex])
+        self._channel_weights: Dict[float, Dict[str, complex]] = {}
+
 
         logger.info(
             f"PhaseEngine initialized with {len(self.sources)} sources, "
@@ -379,9 +382,96 @@ class PhaseEngine:
     ) -> Optional[Tuple[np.ndarray, int]]:
         """
         Get mathematically combined samples for a virtual channel.
-        Applies continuous, per-channel cross-correlation phase alignment.
+        Applies continuous, per-channel cross-correlation phase alignment with EMA smoothing.
         """
         if self.combiner is None:
+            return None
+
+        freq_hz = virtual_channel.get("frequency_hz")
+        if not freq_hz:
+            return None
+
+        samples = {}
+        authoritative_timestamp = None
+        
+        for name, source in self.sources.items():
+            result = source.consume_samples(freq_hz, max_samples)
+            if result is not None:
+                s, ts = result
+                samples[name] = s
+                if name == self.reference_source:
+                    authoritative_timestamp = ts
+
+        if not samples or authoritative_timestamp is None:
+            return None
+            
+        # Initialize weight tracking for this frequency if needed
+        if freq_hz not in self._channel_weights:
+            self._channel_weights[freq_hz] = {name: 1.0 + 0j for name in self.array.antenna_names}
+            
+        # Per-channel continuous alignment
+        ref_samples = samples.get(self.reference_source)
+        if ref_samples is not None and len(ref_samples) > 0:
+            calibration_weights = np.ones(self.array.n_elements, dtype=np.complex64)
+            
+            # EMA smoothing factor (e.g. 0.05 means 95% old, 5% new)
+            # This integrates out fast ionospheric scintillation on skywaves
+            alpha = 0.05 
+            
+            for i, name in enumerate(self.array.antenna_names):
+                if name == self.reference_source:
+                    calibration_weights[i] = 1.0 + 0j
+                    continue
+                    
+                tgt_samples = samples.get(name)
+                if tgt_samples is not None and len(tgt_samples) > 0:
+                    try:
+                        res = self.aligner.calibrate_pair(
+                            ref_samples, 
+                            tgt_samples, 
+                            self.reference_source, 
+                            name, 
+                            freq_hz
+                        )
+                        # We apply the inverse phase to align the target to the reference
+                        raw_weight = np.exp(-1j * res.phase_offset_rad)
+                        
+                        # Apply Exponential Moving Average (EMA) to the complex weight
+                        old_weight = self._channel_weights[freq_hz][name]
+                        smoothed_weight = (1 - alpha) * old_weight + alpha * raw_weight
+                        
+                        # Normalize to maintain unity gain
+                        smoothed_weight /= np.abs(smoothed_weight)
+                        
+                        self._channel_weights[freq_hz][name] = smoothed_weight
+                        calibration_weights[i] = smoothed_weight
+                        
+                    except Exception as e:
+                        logger.warning(f"Continuous alignment failed for {name} at {freq_hz}: {e}")
+                        # Fallback to last known good weight
+                        calibration_weights[i] = self._channel_weights[freq_hz][name]
+                else:
+                    calibration_weights[i] = self._channel_weights[freq_hz][name]
+            
+            # Apply these dynamically calculated, smoothed weights
+            self.combiner.set_calibration(calibration_weights)
+
+        method = virtual_channel.get("combining_method", "mrc")
+        bearing_deg = virtual_channel.get("bearing_deg", 0.0)
+
+        try:
+            a_target = None
+            if method in ("beamform", "mvdr"):
+                steer_az = np.radians(bearing_deg)
+                el_rad = np.radians(10.0)
+                k_vector = self.array.get_wave_vector(steer_az, el_rad, freq_hz)
+                a_target = self.array.steering_vector(k_vector)
+
+            combined = self.combiner.process(samples, method=method, steering_vector=a_target)
+            return combined, authoritative_timestamp
+
+        except Exception as e:
+            logger.error(f"Error combining samples: {e}")
             return None
 
         freq_hz = virtual_channel.get("frequency_hz")
