@@ -38,34 +38,22 @@ def run_daemon(args):
     try:
         # 1. Connect to sources
         engine.connect()
-
-        # 2. Calibrate
-        logger.info("Running initial calibration...")
-        cal_result = engine.calibrate(duration_sec=3.0)
         
-        if cal_result:
-            try:
-                state_dir = Path("/var/lib/phase-engine")
-                state_dir.mkdir(parents=True, exist_ok=True)
-                with open(state_dir / "calibration_result.json", "w") as f:
-                    json.dump(cal_result.to_dict(), f, indent=2)
-                logger.info(f"Exported calibration results to {state_dir}/calibration_result.json")
-            except Exception as e:
-                logger.warning(f"Failed to export calibration results: {e}")
-
-        # 3. Start engine capture (pulls data from physical radiods)
+        # Note: Global startup calibration is theoretically invalid due to NCO ambiguity.
+        # phase-engine now relies on continuous, per-channel alignment in the data plane.
+        
+        # 2. Start engine capture (pulls data from physical radiods)
         engine.start()
 
-        # 4. Start control server (listens for hf-timestd requests)
+        # 3. Start control server (listens for hf-timestd requests)
         server.start()
 
-        # 5. Start egress loop (pushes combined data back out)
+        # 4. Start egress loop (pushes combined data back out)
         loop.start()
 
         logger.info("Phase Engine Daemon running. Press Ctrl+C to stop.")
         while True:
             time.sleep(1.0)
-
     except KeyboardInterrupt:
         logger.info("Shutting down...")
     except Exception as e:

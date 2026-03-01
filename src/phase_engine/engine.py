@@ -379,15 +379,71 @@ class PhaseEngine:
     ) -> Optional[Tuple[np.ndarray, int]]:
         """
         Get mathematically combined samples for a virtual channel.
-
-        Args:
-            virtual_channel: The virtual channel config dict
-            max_samples: Maximum number of samples to return
-
-        Returns:
-            Tuple of (combined complex sample array, RTP timestamp), or None if not available
+        Applies continuous, per-channel cross-correlation phase alignment.
         """
         if self.combiner is None:
+            return None
+
+        freq_hz = virtual_channel.get("frequency_hz")
+        if not freq_hz:
+            return None
+
+        samples = {}
+        authoritative_timestamp = None
+        
+        for name, source in self.sources.items():
+            result = source.consume_samples(freq_hz, max_samples)
+            if result is not None:
+                s, ts = result
+                samples[name] = s
+                if name == self.reference_source:
+                    authoritative_timestamp = ts
+
+        if not samples or authoritative_timestamp is None:
+            return None
+            
+        # Per-channel continuous alignment
+        # Extract the exact length block of samples we are about to process
+        ref_samples = samples.get(self.reference_source)
+        if ref_samples is not None and len(ref_samples) > 0:
+            calibration_weights = np.ones(self.array.n_elements, dtype=np.complex64)
+            for i, name in enumerate(self.array.antenna_names):
+                if name == self.reference_source:
+                    continue
+                tgt_samples = samples.get(name)
+                if tgt_samples is not None and len(tgt_samples) > 0:
+                    try:
+                        res = self.aligner.calibrate_pair(
+                            ref_samples, 
+                            tgt_samples, 
+                            self.reference_source, 
+                            name, 
+                            freq_hz
+                        )
+                        # We apply the inverse phase to align the target to the reference
+                        calibration_weights[i] = np.exp(-1j * res.phase_offset_rad)
+                    except Exception as e:
+                        logger.warning(f"Continuous alignment failed for {name} at {freq_hz}: {e}")
+            
+            # Apply these dynamically calculated weights
+            self.combiner.set_calibration(calibration_weights)
+
+        method = virtual_channel.get("combining_method", "mrc")
+        bearing_deg = virtual_channel.get("bearing_deg", 0.0)
+
+        try:
+            a_target = None
+            if method in ("beamform", "mvdr"):
+                steer_az = np.radians(bearing_deg)
+                el_rad = np.radians(10.0)
+                k_vector = self.array.get_wave_vector(steer_az, el_rad, freq_hz)
+                a_target = self.array.steering_vector(k_vector)
+
+            combined = self.combiner.process(samples, method=method, steering_vector=a_target)
+            return combined, authoritative_timestamp
+
+        except Exception as e:
+            logger.error(f"Error combining samples: {e}")
             return None
 
         freq_hz = virtual_channel.get("frequency_hz")
