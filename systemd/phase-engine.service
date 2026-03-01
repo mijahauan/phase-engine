@@ -1,0 +1,25 @@
+[Unit]
+Description=Phase Engine - Coherent HF Phased Array Middleware
+After=network.target
+
+[Service]
+Type=simple
+User=phase-engine
+Group=phase-engine
+WorkingDirectory=/opt/phase-engine
+
+# Activate the venv and run the daemon
+ExecStart=/opt/phase-engine/venv/bin/phase-engine daemon --config /etc/phase-engine/config.toml
+
+# Automatic restart on failure
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+ProtectSystem=full
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

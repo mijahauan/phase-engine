@@ -103,6 +103,33 @@ pip install -e .[dev,plot]
 phase-engine daemon --config config/phase-engine.toml
 ```
 
+### Production Deployment (systemd)
+
+For long-running environments, it is recommended to install `phase-engine` as a `systemd` service so it starts automatically alongside your physical `radiod` instances.
+
+An installation script is provided to set up a dedicated `phase-engine` user, create the virtual environment in `/opt/phase-engine`, and install the systemd unit file.
+
+1. **Run the install script as root:**
+```bash
+sudo ./install.sh
+```
+
+2. **Configure your array geometry:**
+```bash
+sudo nano /etc/phase-engine/config.toml
+```
+
+3. **Start and enable the service:**
+```bash
+sudo systemctl enable phase-engine
+sudo systemctl start phase-engine
+```
+
+4. **Monitor the logs:**
+```bash
+sudo journalctl -u phase-engine -f
+```
+
 ## Array Pattern Visualization Tool
 
 Phase Engine includes a built-in CLI tool to generate high-resolution polar plots of your theoretical array radiation pattern based on your physical layout and DSP configuration.
