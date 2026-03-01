@@ -8,7 +8,7 @@ for coherent array processing.
 
 import hashlib
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional, Callable, Tuple
 import numpy as np
 import threading
 import time
@@ -39,6 +39,7 @@ class ChannelState:
     port: int
     recorder: Optional[RTPRecorder] = None
     samples: List[np.ndarray] = field(default_factory=list)
+    first_timestamp: Optional[int] = None
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -257,6 +258,8 @@ class RadiodSource:
                 def handler(header, payload, wallclock):
                     samples = np.frombuffer(payload, dtype=np.float32).view(np.complex64)
                     with s.lock:
+                        if not s.samples:
+                            s.first_timestamp = header.timestamp
                         s.samples.append(samples.copy())
 
                 return handler
@@ -323,7 +326,7 @@ class RadiodSource:
         self,
         frequency_hz: float,
         max_samples: Optional[int] = None,
-    ) -> Optional[np.ndarray]:
+    ) -> Optional[Tuple[np.ndarray, int]]:
         """
         Atomically read and clear captured samples for a frequency.
 
@@ -336,7 +339,8 @@ class RadiodSource:
             max_samples: Maximum number of samples to return
 
         Returns:
-            Complex sample array, or None if no samples available
+            Tuple of (complex sample array, RTP timestamp of first sample),
+            or None if no samples available
         """
         state = self._channels.get(frequency_hz)
         if state is None:
@@ -345,14 +349,36 @@ class RadiodSource:
         with state.lock:
             if not state.samples:
                 return None
+            
             raw = list(state.samples)
+            timestamp = state.first_timestamp
             state.samples.clear()
+            state.first_timestamp = None
+
+        if not raw or timestamp is None:
+            return None
 
         samples = np.concatenate(raw)
+        
+        # If we hit max_samples, keep the leftovers in the buffer
+        # and advance their timestamp so we don't lose them
         if max_samples is not None and len(samples) > max_samples:
+            leftovers = samples[max_samples:]
             samples = samples[:max_samples]
+            
+            with state.lock:
+                # Put leftovers back at the front
+                state.samples.insert(0, leftovers)
+                # If new packets arrived while we were concatenating, they go after leftovers.
+                # The timestamp for the first element is now the original + max_samples
+                if state.first_timestamp is None:
+                    # No new packets arrived, or we're the first thing
+                    state.first_timestamp = (timestamp + max_samples) % (2**32)
+                else:
+                    # New packets arrived, but our leftovers are older, so they dictate the start
+                    state.first_timestamp = (timestamp + max_samples) % (2**32)
 
-        return samples
+        return samples, timestamp
 
     def clear_samples(self, frequency_hz: Optional[float] = None) -> None:
         """

@@ -37,12 +37,14 @@ class EgressLoop:
             # For each active virtual channel, pull combined samples and stream
             # Note: We limit the max_samples here to keep latency low.
             for ssrc, vchan in active_channels.items():
-                samples = self.engine.get_combined_samples(vchan, max_samples=4800)
+                result = self.engine.get_combined_samples(vchan, max_samples=4800)
 
-                if samples is not None and len(samples) > 0:
-                    streamer = self.channel_manager.get_streamer(ssrc)
-                    if streamer:
-                        streamer.stream_samples(samples)
+                if result is not None:
+                    samples, timestamp = result
+                    if len(samples) > 0:
+                        streamer = self.channel_manager.get_streamer(ssrc)
+                        if streamer:
+                            streamer.stream_samples(samples, timestamp)
 
             # Sleep ~half the nominal chunk duration so we wake up when new samples
             # are ready. At 24kHz / 4800-sample chunks that's ~200ms per chunk;

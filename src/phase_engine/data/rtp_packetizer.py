@@ -29,13 +29,22 @@ class RtpStreamer:
         # Assuming TTL=2 for local subnets
         self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
 
-    def stream_samples(self, samples: np.ndarray):
+    def stream_samples(self, samples: np.ndarray, start_timestamp: int):
         """
-        Takes complex64 samples and packetizes them.
+        Takes complex64 samples and packetizes them using the provided RTP timestamp.
+        
+        Args:
+            samples: Complex64 array of samples to stream
+            start_timestamp: The original GPS-disciplined RTP timestamp of the first sample
+            
         ka9q-radio typically sends 320 complex samples per packet for 12kHz/16kHz/24kHz rates.
         Encoding format: F32 (float32 interleaved I, Q)
         """
         SAMPLES_PER_PACKET = 320
+
+        # Sync our internal timestamp tracker with the provided authoritative one.
+        # This fixes massive sequence gaps in clients if the egress loop stalls or drops packets.
+        self.rtp_timestamp = start_timestamp
 
         # Flatten complex to float32 interleaved [I0, Q0, I1, Q1, ...]
         flat_samples = np.zeros(len(samples) * 2, dtype=np.float32)

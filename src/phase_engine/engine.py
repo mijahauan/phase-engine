@@ -355,18 +355,18 @@ class PhaseEngine:
 
     def get_combined_samples(
         self,
-        virtual_channel: dict,
+        virtual_channel: Dict[str, Any],
         max_samples: Optional[int] = None,
-    ) -> Optional[np.ndarray]:
+    ) -> Optional[Tuple[np.ndarray, int]]:
         """
-        Get combined samples for a virtual channel.
+        Get mathematically combined samples for a virtual channel.
 
         Args:
-            virtual_channel: Virtual channel state dictionary
-            max_samples: Maximum samples to return
+            virtual_channel: The virtual channel config dict
+            max_samples: Maximum number of samples to return
 
         Returns:
-            Combined complex sample array, or None if not available
+            Tuple of (combined complex sample array, RTP timestamp), or None if not available
         """
         if self.combiner is None:
             return None
@@ -379,12 +379,19 @@ class PhaseEngine:
         # consume_samples() clears the buffer atomically so the egress loop
         # does not reprocess the same data on the next iteration.
         samples = {}
+        authoritative_timestamp = None
+        
         for name, source in self.sources.items():
-            s = source.consume_samples(freq_hz, max_samples)
-            if s is not None:
+            result = source.consume_samples(freq_hz, max_samples)
+            if result is not None:
+                s, ts = result
                 samples[name] = s
+                # Use the reference source's timestamp as the authoritative time
+                # for the combined stream.
+                if name == self.reference_source:
+                    authoritative_timestamp = ts
 
-        if not samples:
+        if not samples or authoritative_timestamp is None:
             return None
 
         # Determine the combining method requested by the client
@@ -403,7 +410,7 @@ class PhaseEngine:
                 a_target = self.array.get_steering_vector(freq_hz, bearing_deg)
 
             combined = self.combiner.process(samples, method=method, steering_vector=a_target)
-            return combined
+            return combined, authoritative_timestamp
 
         except (ValueError, np.linalg.LinAlgError) as e:
             logger.error(f"Combining failed for SSRC {virtual_channel.get('ssrc')} at {freq_hz/1e6:.3f} MHz: {e}")
