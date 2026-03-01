@@ -296,7 +296,7 @@ class RadiodSource:
         max_samples: Optional[int] = None,
     ) -> Optional[np.ndarray]:
         """
-        Get captured samples for a frequency.
+        Get captured samples for a frequency (non-destructive peek).
 
         Args:
             frequency_hz: Frequency to get samples for
@@ -314,6 +314,41 @@ class RadiodSource:
                 return None
             samples = np.concatenate(state.samples)
 
+        if max_samples is not None and len(samples) > max_samples:
+            samples = samples[:max_samples]
+
+        return samples
+
+    def consume_samples(
+        self,
+        frequency_hz: float,
+        max_samples: Optional[int] = None,
+    ) -> Optional[np.ndarray]:
+        """
+        Atomically read and clear captured samples for a frequency.
+
+        Use this in the egress loop to avoid reprocessing stale data on
+        every iteration. After this call the buffer is empty until new
+        RTP packets arrive.
+
+        Args:
+            frequency_hz: Frequency to consume samples for
+            max_samples: Maximum number of samples to return
+
+        Returns:
+            Complex sample array, or None if no samples available
+        """
+        state = self._channels.get(frequency_hz)
+        if state is None:
+            return None
+
+        with state.lock:
+            if not state.samples:
+                return None
+            raw = list(state.samples)
+            state.samples.clear()
+
+        samples = np.concatenate(raw)
         if max_samples is not None and len(samples) > max_samples:
             samples = samples[:max_samples]
 

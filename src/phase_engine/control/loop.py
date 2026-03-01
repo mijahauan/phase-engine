@@ -44,5 +44,7 @@ class EgressLoop:
                     if streamer:
                         streamer.stream_samples(samples)
 
-            # Sleep briefly to yield CPU, but keep it tight enough to not overflow ring buffers
-            time.sleep(0.01)
+            # Sleep ~half the nominal chunk duration so we wake up when new samples
+            # are ready. At 24kHz / 4800-sample chunks that's ~200ms per chunk;
+            # sleeping 100ms keeps latency low while not burning CPU on empty polls.
+            time.sleep(0.1)

@@ -375,10 +375,12 @@ class PhaseEngine:
         if not freq_hz:
             return None
 
-        # Collect samples from all sources at this frequency
+        # Collect and consume samples from all sources at this frequency.
+        # consume_samples() clears the buffer atomically so the egress loop
+        # does not reprocess the same data on the next iteration.
         samples = {}
         for name, source in self.sources.items():
-            s = source.get_samples(freq_hz, max_samples)
+            s = source.consume_samples(freq_hz, max_samples)
             if s is not None:
                 samples[name] = s
 
