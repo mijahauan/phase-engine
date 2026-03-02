@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "phase-engine"
-version = "1.2.0"
+version = "1.2.1"
 description = "Coherent HF Phased Array Middleware for GPSDO-locked SDRs"
 readme = "README.md"
 license = {text = "MIT"}
