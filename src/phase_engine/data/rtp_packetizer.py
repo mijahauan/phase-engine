@@ -26,6 +26,15 @@ class RtpStreamer:
 
         # Setup socket (UDP Multicast/Unicast)
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        
+        # Increase the send buffer size to 5MB to handle synchronous multi-channel bursts.
+        # This prevents dropped UDP packets on the loopback interface when phase-engine
+        # tries to send e.g. 17 channels * 15 packets instantly every 100ms.
+        try:
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 5 * 1024 * 1024)
+        except OSError as e:
+            logger.debug(f"Failed to set SO_SNDBUF: {e}")
+
         # Assuming TTL=2 for local subnets
         self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
 
