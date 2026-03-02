@@ -72,6 +72,14 @@ However, if the array consists of physically distinct antennas (e.g., a random l
 1. **Gain and Noise Mismatch:** A highly efficient longwire might yield a signal physically 20 dB stronger than a lossy T3FD, but both might share a similar ambient noise floor. Adding them straight across (EGC) would actually *degrade* the array SNR because the weak antenna injects pure noise.
 2. **Polarization Diversity:** A horizontal wire and a vertical dipole react entirely differently to the changing polarization of ionospheric skywaves (Faraday rotation). When the horizontal wire enters a deep fade, the vertical dipole often spikes in strength.
 
+### Does Phase Engine Auto-Detect Array Type?
+No. The phase engine relies purely on the raw complex voltage of the incoming signals. It does not "know" if the antennas producing those voltages are identical vertical whips or a random assortment of wire antennas. 
+
+Therefore, you must explicitly declare your mathematical intent in `config.toml`:
+
+* **For Diversity Arrays (Mismatched Antennas):** You must set `default_combining_method = "mrc"`. If you mistakenly set it to `mvdr`, the engine will attempt to calculate a spatial steering vector based on your array's XYZ coordinates. Because the phase center and polarization of a longwire vs a vertical are entirely different, this geometric vector will be mathematically invalid, resulting in destructive interference.
+* **For Phased Arrays (Identical Antennas):** You can set `default_combining_method = "mvdr"` or `"beamform"`. Because the antennas have identical physical characteristics, the phase difference between them is purely a function of geometric distance and arrival angle. This allows the spatial steering matrix to correctly point beams and carve deep nulls.
+
 ### Noise-Normalized Maximum Ratio Combining (MRC)
 To optimally exploit a Diversity Array, `phase-engine` utilizes Noise-Normalized Maximum Ratio Combining.
 Instead of adding the antennas equally, the DSP calculates an optimal weight for each element: $W_i \propto \frac{S_i}{N_i^2}$, where $S$ is signal voltage and $N^2$ is noise variance.

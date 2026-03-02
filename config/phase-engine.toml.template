@@ -24,7 +24,16 @@ correlation_threshold = 0.15
 # - adaptive: MVDR adaptive nulling
 default_reception_mode = "focus"
 
-# Default combining method: mrc, egc, selection
+# --- DSP Algorithm Selection ---
+# The engine does NOT auto-detect if your antennas are identical. You must tell it how to process them.
+#
+# If you have DIVERSE antennas (e.g. Longwire + T3FD + Vertical):
+#   Use "mrc" (Maximum Ratio Combining). Geometric beamforming is impossible with mixed antennas. 
+#   MRC will mathematically align phases and auto-weight the antennas to maximize raw SNR and prevent fading.
+#
+# If you have IDENTICAL antennas (e.g. 3 identical vertical whips):
+#   Use "mvdr" (Minimum Variance Distortionless Response) or "beamform". 
+#   This enables true spatial steering and deep nulling based on your array geometry.
 default_combining_method = "mrc"
 
 [qth]
