@@ -1,43 +1,52 @@
 """
 TLV decoding for ka9q-radio commands.
-Provides a pure Python port of radiod's decode_X functions from status.c
+
+Provides a pure-Python decoder for the Type-Length-Value wire format used by
+ka9q-radio's control protocol (status.c).  Field type identifiers are imported
+from the canonical ``ka9q.types.StatusType`` enum so that phase-engine always
+agrees with ka9q-python on tag numbers.
+
+Wire format (per field)::
+
+    [type: 1 byte] [length: 1+ bytes] [value: <length> bytes]
+
+Length uses an extended encoding when the high bit is set (see radiod source).
+A type byte of ``StatusType.EOL`` (0) terminates the packet.
 """
 
 import struct
 import socket
 from typing import Dict, Any
 
+from ka9q.types import StatusType
 
-# StatusType enumeration (matching ka9q/types.py and status.h)
-class StatusType:
-    EOL = 0
-    COMMAND_TAG = 1
-    CMD_CNT = 2
-    GPS_TIME = 3
-    DESCRIPTION = 4
-    STATUS_DEST_SOCKET = 5
-    SETOPTS = 6
-    CLEAROPTS = 7
-    RTP_TIMESNAP = 8
-    BIN_BYTE_DATA = 9
-    INPUT_SAMPRATE = 10
+_FLOAT_TYPES = frozenset({
+    StatusType.RADIO_FREQUENCY,
+    StatusType.FIRST_LO_FREQUENCY,
+    StatusType.SECOND_LO_FREQUENCY,
+    StatusType.SHIFT_FREQUENCY,
+    StatusType.DOPPLER_FREQUENCY,
+    StatusType.DOPPLER_FREQUENCY_RATE,
+    StatusType.GAIN,
+    StatusType.OUTPUT_LEVEL,
+    StatusType.IF_POWER,
+    StatusType.BASEBAND_POWER,
+    StatusType.NOISE_DENSITY,
+    StatusType.LOW_EDGE,
+    StatusType.HIGH_EDGE,
+    StatusType.HEADROOM,
+})
 
-    OUTPUT_DATA_SOURCE_SOCKET = 16
-    OUTPUT_DATA_DEST_SOCKET = 17
-    OUTPUT_SSRC = 18
-    OUTPUT_TTL = 19
-    OUTPUT_SAMPRATE = 20
+_STRING_TYPES = frozenset({
+    StatusType.PRESET,
+    StatusType.DESCRIPTION,
+})
 
-    RADIO_FREQUENCY = 33
-    DEMOD_TYPE = 48
-
-    AGC_ENABLE = 52
-    GAIN = 56
-    OUTPUT_LEVEL = 57
-    OUTPUT_SAMPLES = 58
-
-    PRESET = 68
-    OUTPUT_ENCODING = 85
+_SOCKET_TYPES = frozenset({
+    StatusType.OUTPUT_DATA_DEST_SOCKET,
+    StatusType.OUTPUT_DATA_SOURCE_SOCKET,
+    StatusType.STATUS_DEST_SOCKET,
+})
 
 
 def decode_tlv_packet(buffer: bytes) -> Dict[Any, Any]:
@@ -86,19 +95,17 @@ def decode_tlv_packet(buffer: bytes) -> Dict[Any, Any]:
 
         # Decode value based on type_val
         val = None
-        # Float/Double
-        if type_val in (StatusType.RADIO_FREQUENCY, StatusType.GAIN, StatusType.OUTPUT_LEVEL):
+
+        if type_val in _FLOAT_TYPES:
             if optlen == 4:
                 val = struct.unpack(">f", data)[0]
             elif optlen == 8:
                 val = struct.unpack(">d", data)[0]
             else:
                 val = int.from_bytes(data, byteorder="big", signed=False)
-        # String
-        elif type_val in (StatusType.PRESET, StatusType.DESCRIPTION):
+        elif type_val in _STRING_TYPES:
             val = data.decode("utf-8", errors="ignore")
-        # Sockets
-        elif type_val in (StatusType.OUTPUT_DATA_DEST_SOCKET, StatusType.STATUS_DEST_SOCKET):
+        elif type_val in _SOCKET_TYPES:
             # Wire format: AF_INET (2 bytes) | port (2 bytes) | IPv4 (4 bytes)
             if optlen >= 8:
                 port = struct.unpack(">H", data[2:4])[0]

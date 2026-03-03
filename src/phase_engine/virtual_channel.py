@@ -14,7 +14,9 @@ Channel lifecycle:
 """
 
 import hashlib
+import json
 import logging
+import os
 from typing import Dict, Any, Optional
 import threading
 
@@ -25,6 +27,9 @@ logger = logging.getLogger(__name__)
 
 class VirtualChannelManager:
     """Manages the lifecycle of virtual channels served by the engine."""
+
+    # Persistent state file for surviving phase-engine restarts.
+    STATE_FILE = "/var/lib/phase-engine/channels.json"
 
     def __init__(self, engine):
         self.engine = engine
@@ -46,6 +51,7 @@ class VirtualChannelManager:
                 self._channels[ssrc][k] = v
 
         self._evaluate_channel(ssrc)
+        self._save_state()
 
     @staticmethod
     def _assign_output_address(ssrc: int) -> tuple:
@@ -67,7 +73,13 @@ class VirtualChannelManager:
         return ip, port
 
     def _evaluate_channel(self, ssrc: int):
-        """Check if channel is fully configured and needs a streamer spun up."""
+        """Check if channel is fully configured and needs a streamer spun up.
+
+        Assigns the output destination immediately (so the status multicast
+        advertises the channel right away) then provisions radiod sources and
+        spins up the RTP streamer in a background thread so the control-server
+        command listener is never blocked.
+        """
         with self._lock:
             chan = self._channels[ssrc]
 
@@ -78,6 +90,9 @@ class VirtualChannelManager:
             if ssrc in self._streamers:
                 return  # Already streaming
 
+            if chan.get("_provisioning"):
+                return  # Already being provisioned in background
+
             freq = chan["frequency_hz"]
 
             # Assign a deterministic output multicast address for the combined stream.
@@ -85,18 +100,46 @@ class VirtualChannelManager:
             # subscribe.  Clients (hf-timestd / ka9q-python) never send a destination.
             ip, port = self._assign_output_address(ssrc)
             chan["destination"] = f"{ip}:{port}"
+            chan["_provisioning"] = True
 
-        # Open physical channels on all radiod sources at this frequency.
-        # Done outside the lock because engine.open_channel() acquires its own.
+        # Run the slow radiod provisioning + streamer creation in a background
+        # thread so that the command listener can continue processing CMDs and
+        # answering discovery polls while this channel is being set up.
+        t = threading.Thread(
+            target=self._provision_channel,
+            args=(ssrc, freq),
+            name=f"Provision-{ssrc}",
+            daemon=True,
+        )
+        t.start()
+
+    def _provision_channel(self, ssrc: int, freq: float):
+        """Background worker: open physical radiod channels and start RTP streamer."""
         try:
-            self.engine.open_channel(freq)
+            with self._lock:
+                chan = self._channels.get(ssrc)
+                if chan is None:
+                    return
+                params = {
+                    'sample_rate': chan.get('sample_rate'),
+                    'preset': chan.get('preset'),
+                }
+
+            self.engine.open_channel(freq, **params)
         except (RuntimeError, OSError) as e:
             logger.error(f"Failed to open physical channels for SSRC {ssrc} at {freq} Hz: {e}")
+            with self._lock:
+                chan = self._channels.get(ssrc)
+                if chan:
+                    chan.pop("_provisioning", None)
             return
 
         with self._lock:
-            chan = self._channels[ssrc]
-            # Retrieve the destination that was just assigned
+            chan = self._channels.get(ssrc)
+            if chan is None:
+                return
+            chan.pop("_provisioning", None)
+
             ip, port = chan["destination"].split(":")
             port = int(port)
 
@@ -104,9 +147,9 @@ class VirtualChannelManager:
                 f"Starting virtual stream for SSRC {ssrc} at {freq} Hz -> {ip}:{port}"
             )
 
-            # Create streamer targeting our assigned multicast address
+            sample_rate = chan.get("sample_rate", self.engine.sample_rate)
             streamer = RtpStreamer(
-                destination_ip=ip, port=port, ssrc=ssrc, sample_rate=self.engine.sample_rate
+                destination_ip=ip, port=port, ssrc=ssrc, sample_rate=sample_rate
             )
             self._streamers[ssrc] = streamer
 
@@ -126,6 +169,8 @@ class VirtualChannelManager:
             except (RuntimeError, OSError) as e:
                 logger.warning(f"Failed to close physical channels for SSRC {ssrc} at {freq} Hz: {e}")
 
+        self._save_state()
+
     def get_channels(self) -> list:
         with self._lock:
             return list(self._channels.values())
@@ -142,3 +187,75 @@ class VirtualChannelManager:
                 for ssrc, chan in self._channels.items()
                 if ssrc in self._streamers and "frequency_hz" in chan
             }
+
+    # ------------------------------------------------------------------
+    # Persistent channel state
+    # ------------------------------------------------------------------
+
+    def _save_state(self) -> None:
+        """Persist current channel definitions to disk.
+
+        Only serialisable keys are saved (ssrc, frequency_hz, sample_rate,
+        preset, encoding, combining_method, bearing_deg).  Runtime artefacts
+        like destination and streamer references are excluded.
+        """
+        persist_keys = {
+            "ssrc", "frequency_hz", "sample_rate", "preset",
+            "encoding", "combining_method", "bearing_deg", "demod_type",
+        }
+        with self._lock:
+            records = []
+            for chan in self._channels.values():
+                record = {k: v for k, v in chan.items() if k in persist_keys}
+                if "ssrc" in record and "frequency_hz" in record:
+                    records.append(record)
+
+        try:
+            os.makedirs(os.path.dirname(self.STATE_FILE), exist_ok=True)
+            tmp = self.STATE_FILE + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(records, f, indent=2)
+            os.replace(tmp, self.STATE_FILE)
+            logger.debug(f"Saved {len(records)} channel(s) to {self.STATE_FILE}")
+        except OSError as e:
+            logger.warning(f"Failed to persist channel state: {e}")
+
+    def restore_channels(self) -> int:
+        """Restore channels from disk after a phase-engine restart.
+
+        Replays every saved channel through configure_channel() so that
+        physical radiod channels are re-created and egress streamers spun
+        up — without waiting for the client to re-request them.
+
+        Returns:
+            Number of channels restored.
+        """
+        if not os.path.exists(self.STATE_FILE):
+            logger.info("No saved channel state found — starting fresh")
+            return 0
+
+        try:
+            with open(self.STATE_FILE, "r") as f:
+                records = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning(f"Could not load channel state: {e}")
+            return 0
+
+        restored = 0
+        for rec in records:
+            ssrc = rec.get("ssrc")
+            if ssrc is None:
+                continue
+            params = {k: v for k, v in rec.items() if k != "ssrc"}
+            try:
+                self.configure_channel(ssrc, params)
+                restored += 1
+                logger.info(
+                    f"Restored channel SSRC {ssrc} at "
+                    f"{params.get('frequency_hz', 0) / 1e6:.3f} MHz"
+                )
+            except Exception as e:
+                logger.error(f"Failed to restore channel SSRC {ssrc}: {e}")
+
+        logger.info(f"Restored {restored}/{len(records)} channel(s) from {self.STATE_FILE}")
+        return restored

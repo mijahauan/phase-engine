@@ -5,9 +5,17 @@ Transform multiple GPSDO-locked RX888 SDRs into a single, coherent
 virtual receiver for diversity reception, beamforming, and interferometry.
 """
 
-__version__ = "1.2.1"
+import os
+# Limit numpy/scipy threading to prevent CPU explosion in the dataplane
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
-from .engine import PhaseEngine, SourceConfig, CalibrationResult
+__version__ = "1.3.0"
+
+from .engine import PhaseEngine, SourceConfig
 from .client import (
     PhaseEngineControl,
     PhaseEngineStream,
@@ -20,7 +28,6 @@ __all__ = [
     # Engine
     "PhaseEngine",
     "SourceConfig",
-    "CalibrationResult",
     # Client API
     "PhaseEngineControl",
     "PhaseEngineStream",

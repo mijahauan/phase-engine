@@ -1,7 +1,7 @@
 # Phase Engine
 
-**Date:** 2026-03-01  
-**Version:** 1.2.0  
+**Date:** 2026-03-03  
+**Version:** 1.3.0  
 
 **Phase Engine** is a high-performance middleware daemon that transforms an array of independent `ka9q-radio` SDR receivers into a coherent, steerable phased array. 
 

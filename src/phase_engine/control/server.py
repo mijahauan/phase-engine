@@ -1,5 +1,19 @@
 """
-Control Plane Server. Maps radiod network interactions to the Phase Engine.
+Control Plane Server — maps ka9q-radio network interactions to the Phase Engine.
+
+Implements two threads:
+
+1. **Command listener** — receives UDP TLV CMD packets on the status multicast
+   group (port 5006).  Handles channel creation, discovery polls
+   (``SSRC=0xFFFFFFFF``), and echoes STATUS ACKs with the engine-assigned output
+   multicast address.
+
+2. **Status multicaster** — periodically broadcasts binary TLV STATUS packets
+   (every 0.5 s) so that ``ka9q-python``'s ``discover_channels()`` can find
+   phase-engine channels exactly as it would find native radiod channels.
+
+Together these two threads make phase-engine indistinguishable from a real
+radiod instance on the network.
 """
 
 import socket
@@ -42,7 +56,7 @@ class ControlServer:
         # 1. Command Listener Socket
         self._cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._cmd_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._cmd_sock.bind(("", self.control_port))
+        self._cmd_sock.bind((self.status_address, self.control_port))
 
         # Join the multicast group so we can receive commands sent to the status address
         import struct
@@ -102,14 +116,23 @@ class ControlServer:
         """Map TLV commands to engine actions."""
         ssrc = tlv.get(StatusType.OUTPUT_SSRC)
 
-        # SSRC 0xFFFFFFFF is a broadcast discovery probe from ka9q tools — ignore silently.
-        if not ssrc or ssrc == 0xFFFFFFFF:
+        if not ssrc:
+            return
+
+        # SSRC 0xFFFFFFFF is a broadcast discovery probe from ka9q tools.
+        # Respond by immediately broadcasting current channel status so that
+        # discover_channels() sees our channels (not stale radiod channels
+        # leaking from other multicast groups on the LAN).
+        if ssrc == 0xFFFFFFFF:
+            self._broadcast_status_now()
             return
 
         logger.info(f"Control server received CMD: {tlv}")
 
         freq = tlv.get(StatusType.RADIO_FREQUENCY)
         preset = tlv.get(StatusType.PRESET)
+        if preset:
+            preset = preset.rstrip('\x00').strip()
         cmd_tag = tlv.get(StatusType.COMMAND_TAG)
         rate = tlv.get(StatusType.OUTPUT_SAMPRATE)
         demod_type = tlv.get(StatusType.DEMOD_TYPE)
@@ -159,10 +182,10 @@ class ControlServer:
 
         if cmd_tag is not None:
             resp.extend(bytes([StatusType.COMMAND_TAG, 4]))
-            resp.extend(struct.pack(">I", cmd_tag))
+            resp.extend(struct.pack(">I", cmd_tag & 0xFFFFFFFF))
 
         resp.extend(bytes([StatusType.OUTPUT_SSRC, 4]))
-        resp.extend(struct.pack(">I", ssrc))
+        resp.extend(struct.pack(">I", ssrc & 0xFFFFFFFF))
 
         # Encode our assigned output multicast address so the client knows where
         # to subscribe.  Format: AF_INET (2 bytes) + port (2 bytes) + IPv4 (4 bytes)
@@ -185,57 +208,65 @@ class ControlServer:
         except OSError as e:
             logger.debug(f"Failed to send ACK: {e}")
 
-    def _status_multicaster_loop(self):
-        """Periodically broadcast binary TLV status so ka9q tools can discover us."""
+    def _broadcast_status_now(self):
+        """Broadcast current channel status immediately (used for poll responses)."""
         import struct
 
+        try:
+            for chan in self.channel_manager.get_channels():
+                ssrc = chan.get("ssrc")
+                freq = chan.get("frequency_hz")
+                dest = chan.get("destination")
+                if not ssrc or not freq or not dest:
+                    continue
+
+                buf = bytearray()
+                buf.append(0)  # Packet Type: STATUS
+
+                # OUTPUT_SSRC
+                buf.extend([StatusType.OUTPUT_SSRC, 4])
+                buf.extend(struct.pack(">I", ssrc & 0xFFFFFFFF))
+
+                # RADIO_FREQUENCY
+                buf.extend([StatusType.RADIO_FREQUENCY, 8])
+                buf.extend(struct.pack(">d", freq))
+
+                # PRESET
+                preset_bytes = chan.get("preset", "iq").encode("utf-8")
+                buf.extend([StatusType.PRESET, len(preset_bytes)])
+                buf.extend(preset_bytes)
+
+                # OUTPUT_SAMPRATE
+                sr = chan.get("sample_rate") or self.engine.sample_rate
+                buf.extend([StatusType.OUTPUT_SAMPRATE, 4])
+                buf.extend(struct.pack(">I", sr))
+
+                # OUTPUT_DATA_DEST_SOCKET — the engine-assigned output multicast address.
+                # This is what ka9q-python's discover_channels() reads to subscribe.
+                dest_ip = dest.split(":")[0] if ":" in dest else dest
+                dest_port = int(dest.split(":")[1]) if ":" in dest else 5004
+                buf.extend([StatusType.OUTPUT_DATA_DEST_SOCKET, 8])
+                buf.extend(struct.pack(">H", socket.AF_INET))
+                buf.extend(struct.pack(">H", dest_port))
+                buf.extend(socket.inet_aton(dest_ip))
+
+                # OUTPUT_ENCODING
+                enc = chan.get("encoding", 0)
+                if enc:
+                    buf.extend([StatusType.OUTPUT_ENCODING, 1])
+                    buf.extend([enc & 0xFF])
+
+                buf.extend([StatusType.EOL, 0])
+
+                self._status_sock.sendto(buf, (self.status_address, 5006))
+
+        except struct.error as e:
+            logger.debug(f"Status multicast packing error: {e}")
+        except OSError as e:
+            logger.debug(f"Status multicast socket error: {e}")
+
+    def _status_multicaster_loop(self):
+        """Periodically broadcast binary TLV status so ka9q tools can discover us."""
         while self._running:
-            try:
-                for chan in self.channel_manager.get_channels():
-                    # Only advertise channels that are fully active (have freq + destination)
-                    ssrc = chan.get("ssrc")
-                    freq = chan.get("frequency_hz")
-                    dest = chan.get("destination")
-                    if not ssrc or not freq or not dest:
-                        continue
-
-                    buf = bytearray()
-                    buf.append(0)  # Packet Type: STATUS
-
-                    # OUTPUT_SSRC
-                    buf.extend([StatusType.OUTPUT_SSRC, 4])
-                    buf.extend(struct.pack(">I", ssrc))
-
-                    # RADIO_FREQUENCY
-                    buf.extend([StatusType.RADIO_FREQUENCY, 8])
-                    buf.extend(struct.pack(">d", freq))
-
-                    # PRESET
-                    preset_bytes = chan.get("preset", "iq").encode("utf-8") + b"\x00"
-                    buf.extend([StatusType.PRESET, len(preset_bytes)])
-                    buf.extend(preset_bytes)
-
-                    # OUTPUT_SAMPRATE
-                    sr = chan.get("sample_rate") or self.engine.sample_rate
-                    buf.extend([StatusType.OUTPUT_SAMPRATE, 4])
-                    buf.extend(struct.pack(">I", sr))
-
-                    # OUTPUT_DATA_DEST_SOCKET — the engine-assigned output multicast address.
-                    # This is what ka9q-python's discover_channels() reads to subscribe.
-                    dest_ip = dest.split(":")[0] if ":" in dest else dest
-                    dest_port = int(dest.split(":")[1]) if ":" in dest else 5004
-                    buf.extend([StatusType.OUTPUT_DATA_DEST_SOCKET, 8])
-                    buf.extend(struct.pack(">H", socket.AF_INET))
-                    buf.extend(struct.pack(">H", dest_port))
-                    buf.extend(socket.inet_aton(dest_ip))
-
-                    buf.extend([StatusType.EOL, 0])
-
-                    self._status_sock.sendto(buf, (self.status_address, 5006))
-
-            except struct.error as e:
-                logger.debug(f"Status multicast packing error: {e}")
-            except OSError as e:
-                logger.debug(f"Status multicast socket error: {e}")
-
+            self._broadcast_status_now()
             time.sleep(0.5)

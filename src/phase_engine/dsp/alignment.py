@@ -1,4 +1,5 @@
 import numpy as np
+from scipy import signal
 from typing import Dict, Optional, Tuple, Any
 import logging
 from dataclasses import dataclass
@@ -42,7 +43,8 @@ class CrossCorrelator:
         tgt = target[:n]
 
         # Calculate correlation
-        correlation = np.correlate(tgt, ref, mode="full")
+        # Use FFT for O(N log N) correlation instead of O(N^2)
+        correlation = signal.correlate(tgt, ref, mode="full", method="fft")
 
         # Find peak
         peak_idx = np.argmax(np.abs(correlation))

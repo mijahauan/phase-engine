@@ -3,6 +3,13 @@
 Command Line Interface for Phase Engine.
 """
 
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
 import sys
 import time
 import logging
@@ -15,6 +22,7 @@ from .engine import PhaseEngine
 from .virtual_channel import VirtualChannelManager
 from .control.server import ControlServer
 from .control.loop import EgressLoop
+from .sdnotify import sd_notify
 
 
 def run_daemon(args):
@@ -51,8 +59,18 @@ def run_daemon(args):
         # 4. Start egress loop (pushes combined data back out)
         loop.start()
 
+        # 5. Restore previously-active channels from persistent state.
+        #    This re-creates physical radiod channels and egress streamers
+        #    so that clients (hf-timestd) do not need to re-request them
+        #    after a phase-engine restart.
+        restored = vcm.restore_channels()
+        if restored:
+            logger.info(f"Restored {restored} channel(s) from previous session")
+
         logger.info("Phase Engine Daemon running. Press Ctrl+C to stop.")
+        sd_notify("READY=1")
         while True:
+            sd_notify("WATCHDOG=1")
             time.sleep(1.0)
     except KeyboardInterrupt:
         logger.info("Shutting down...")

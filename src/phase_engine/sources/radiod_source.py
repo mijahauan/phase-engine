@@ -100,6 +100,8 @@ class RadiodSource:
         self._ssrc_counter = 0
         self._lock = threading.Lock()
         self._capturing = False
+        self._health_thread = None
+        self._last_packet_times = {}  # freq_hz -> timestamp
 
     def connect(self) -> None:
         """Connect to the radiod instance."""
@@ -132,13 +134,6 @@ class RadiodSource:
         self._control = None
         logger.info(f"{self.name}: Disconnected")
 
-    def _allocate_ssrc(self) -> int:
-        """Allocate a unique SSRC for this source."""
-        with self._lock:
-            ssrc = self.ssrc_base + self._ssrc_counter
-            self._ssrc_counter += 1
-            return ssrc
-
     def create_channel(
         self,
         frequency_hz: float,
@@ -162,42 +157,31 @@ class RadiodSource:
         if frequency_hz in self._channels:
             return self._channels[frequency_hz].ssrc
 
-        ssrc = self._allocate_ssrc()
-        sample_rate = sample_rate or self.default_sample_rate
+        sample_rate = int(sample_rate or self.default_sample_rate)
 
-        logger.debug(f"{self.name}: Creating channel at {frequency_hz/1e6:.3f} MHz, SSRC={ssrc}")
+        logger.debug(f"{self.name}: Ensuring channel at {frequency_hz/1e6:.3f} MHz")
 
-        self._control.create_channel(
-            ssrc=ssrc,
-            frequency_hz=frequency_hz,
-            preset=preset,
-            sample_rate=sample_rate,
-            encoding=Encoding.F32,
-        )
+        try:
+            channel_info = self._control.ensure_channel(
+                frequency_hz=frequency_hz,
+                preset=preset,
+                sample_rate=sample_rate,
+                encoding=self.default_encoding,
+                timeout=5.0
+            )
+        except Exception as e:
+            logger.error(f"{self.name}: Failed to ensure channel at {frequency_hz/1e6:.3f} MHz: {e}")
+            raise RuntimeError(f"ensure_channel failed: {e}")
 
-        # Wait for channel to appear in status
-        time.sleep(0.3)
+        with self._lock:
+            self._channels[frequency_hz] = ChannelState(
+                ssrc=channel_info.ssrc,
+                frequency_hz=frequency_hz,
+                multicast_address=channel_info.multicast_address,
+                port=channel_info.port,
+            )
 
-        # Discover channel info
-        channels = discover_channels(self.status_address)
-        channel_info = channels.get(ssrc)
-
-        if channel_info is None:
-            raise RuntimeError(f"{self.name}: Channel {ssrc} not found after creation")
-
-        state = ChannelState(
-            ssrc=ssrc,
-            frequency_hz=frequency_hz,
-            multicast_address=channel_info.multicast_address,
-            port=channel_info.port,
-        )
-
-        self._channels[frequency_hz] = state
-        logger.info(
-            f"{self.name}: Created channel at {frequency_hz/1e6:.3f} MHz -> {state.multicast_address}:{state.port}"
-        )
-
-        return ssrc
+        return channel_info.ssrc
 
     def create_channels(self, frequencies_hz: List[float], **kwargs) -> Dict[float, int]:
         """
@@ -256,6 +240,9 @@ class RadiodSource:
             # Create packet handler
             def make_handler(s: ChannelState):
                 def handler(header, payload, wallclock):
+                    import time
+                    self._last_packet_times[s.frequency_hz] = time.time()
+                    
                     samples = np.frombuffer(payload, dtype=np.float32).view(np.complex64)
                     with s.lock:
                         if not s.samples:
@@ -264,13 +251,17 @@ class RadiodSource:
 
                 return handler
 
-            # Get channel info for recorder
-            channels = discover_channels(self.status_address)
-            channel_info = channels.get(state.ssrc)
-
-            if channel_info is None:
-                logger.warning(f"{self.name}: Channel {state.ssrc} not found")
-                continue
+            from ka9q.discovery import ChannelInfo
+            channel_info = ChannelInfo(
+                ssrc=state.ssrc,
+                frequency=state.frequency_hz,
+                sample_rate=self.default_sample_rate,
+                multicast_address=state.multicast_address,
+                port=state.port,
+                preset="iq",
+                encoding=self.default_encoding,
+                snr=0.0, # Dummy SNR
+            )
 
             state.recorder = RTPRecorder(channel=channel_info, on_packet=make_handler(state))
             state.recorder.start()
@@ -278,6 +269,12 @@ class RadiodSource:
 
         self._capturing = True
         logger.info(f"{self.name}: Started capture on {len(frequencies_hz)} channels")
+        
+        # Start health monitor if not running
+        if self._health_thread is None or not self._health_thread.is_alive():
+            import threading
+            self._health_thread = threading.Thread(target=self._health_monitor_loop, daemon=True, name=f"{self.name}-Health")
+            self._health_thread.start()
 
     def stop_capture(self) -> None:
         """Stop capturing samples."""
@@ -289,8 +286,14 @@ class RadiodSource:
                 state.recorder.stop_recording()
                 state.recorder.stop()
                 state.recorder = None
+                
+        if self._health_thread is not None:
+            self._health_thread.join(timeout=2.0)
+            self._health_thread = None
 
         self._capturing = False
+        self._health_thread = None
+        self._last_packet_times = {}  # freq_hz -> timestamp
         logger.info(f"{self.name}: Stopped capture")
 
     def get_samples(
@@ -419,3 +422,86 @@ class RadiodSource:
     def __repr__(self) -> str:
         status = "connected" if self.is_connected else "disconnected"
         return f"RadiodSource({self.name!r}, {self.status_address!r}, {status})"
+
+    def _health_monitor_loop(self):
+        """Monitor channel health and attempt recovery if RTP drops."""
+        import time
+        logger.info(f"{self.name}: Health monitor started")
+        
+        while self._capturing:
+            time.sleep(1.0)
+            
+            now = time.time()
+            needs_recovery = False
+            
+            with self._lock:
+                # Check for channels that haven't received packets in 3 seconds
+                for freq_hz, state in self._channels.items():
+                    last_pkt = self._last_packet_times.get(freq_hz, now)
+                    if now - last_pkt > 3.0:
+                        logger.warning(f"{self.name}: No RTP packets for {freq_hz/1e6:.3f} MHz in {now-last_pkt:.1f}s")
+                        needs_recovery = True
+                        break
+                        
+            if needs_recovery:
+                logger.warning(f"{self.name}: Initiating source recovery...")
+                try:
+                    # 1. Force reconnect control socket
+                    if self._control is not None:
+                        self._control.close()
+                    self._control = RadiodControl(self.status_address)
+                    
+                    # 2. Recreate all channels
+                    with self._lock:
+                        frequencies = list(self._channels.keys())
+                        
+                    for freq_hz in frequencies:
+                        state = self._channels.get(freq_hz)
+                        if not state:
+                            continue
+                            
+                        # Try to recreate physical channel on backend
+                        try:
+                            channel_info = self._control.ensure_channel(
+                                frequency_hz=freq_hz,
+                                preset="iq",
+                                sample_rate=int(self.default_sample_rate),
+                                encoding=self.default_encoding,
+                            )
+                            logger.info(f"{self.name}: Recreated channel at {freq_hz/1e6:.3f} MHz (SSRC={channel_info.ssrc})")
+                            
+                            # If multicast address changed, recreate the recorder
+                            if (state.multicast_address != channel_info.multicast_address or 
+                                state.port != channel_info.port):
+                                logger.info(f"{self.name}: Destination changed {state.multicast_address}:{state.port} -> {channel_info.multicast_address}:{channel_info.port}. Recreating RTPRecorder.")
+                                
+                                if state.recorder is not None:
+                                    state.recorder.stop_recording()
+                                    state.recorder.stop()
+                                
+                                state.ssrc = channel_info.ssrc
+                                state.multicast_address = channel_info.multicast_address
+                                state.port = channel_info.port
+                                
+                                def make_handler(s: ChannelState):
+                                    def handler(header, payload, wallclock):
+                                        import time
+                                        self._last_packet_times[s.frequency_hz] = time.time()
+                                        samples = np.frombuffer(payload, dtype=np.float32).view(np.complex64)
+                                        with s.lock:
+                                            if not s.samples:
+                                                s.first_timestamp = header.timestamp
+                                            s.samples.append(samples.copy())
+                                    return handler
+                                
+                                state.recorder = RTPRecorder(channel=channel_info, on_packet=make_handler(state))
+                                state.recorder.start()
+                                state.recorder.start_recording()
+
+                            # Reset timeout counter so we give it a chance to connect
+                            self._last_packet_times[freq_hz] = time.time()
+                        except Exception as e:
+                            logger.error(f"{self.name}: Failed to recreate channel {freq_hz/1e6:.3f} MHz: {e}")
+                            
+                except Exception as e:
+                    logger.error(f"{self.name}: Recovery attempt failed: {e}")
