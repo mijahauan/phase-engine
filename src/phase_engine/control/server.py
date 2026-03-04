@@ -16,12 +16,13 @@ Together these two threads make phase-engine indistinguishable from a real
 radiod instance on the network.
 """
 
+import struct
 import socket
 import json
 import logging
 import threading
 import time
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 
 from .tlv import decode_tlv_packet, StatusType
 from ..virtual_channel import VirtualChannelManager
@@ -48,6 +49,13 @@ class ControlServer:
 
         self._listener_thread = None
         self._status_thread = None
+        self._timing_thread = None
+
+        # Cached upstream timing metadata forwarded in our status broadcasts.
+        # Protected by _timing_lock; updated by _timing_poller_loop.
+        self._timing_lock = threading.Lock()
+        self._gps_time: Optional[int] = None      # nanoseconds since Unix epoch
+        self._rtp_timesnap: Optional[int] = None   # 32-bit RTP counter snapshot
 
     def start(self):
         """Start the control server threads."""
@@ -59,8 +67,6 @@ class ControlServer:
         self._cmd_sock.bind((self.status_address, self.control_port))
 
         # Join the multicast group so we can receive commands sent to the status address
-        import struct
-
         try:
             mreq = struct.pack(
                 "=4s4s", socket.inet_aton(self.status_address), socket.inet_aton("0.0.0.0")
@@ -76,9 +82,11 @@ class ControlServer:
 
         self._listener_thread = threading.Thread(target=self._command_listener_loop, daemon=True)
         self._status_thread = threading.Thread(target=self._status_multicaster_loop, daemon=True)
+        self._timing_thread = threading.Thread(target=self._timing_poller_loop, daemon=True, name="TimingPoller")
 
         self._listener_thread.start()
         self._status_thread.start()
+        self._timing_thread.start()
         logger.info(
             f"Phase Engine Control Server listening on UDP {self.control_port}, multicasting status to {self.status_address}"
         )
@@ -176,8 +184,6 @@ class ControlServer:
         so that ka9q-python's ensure_channel() / discover_channels() can immediately
         learn where to subscribe for the combined RTP stream.
         """
-        import struct
-
         resp = bytearray([0])  # STATUS packet
 
         if cmd_tag is not None:
@@ -210,7 +216,10 @@ class ControlServer:
 
     def _broadcast_status_now(self):
         """Broadcast current channel status immediately (used for poll responses)."""
-        import struct
+        # Snapshot the cached upstream timing under lock once per broadcast round
+        with self._timing_lock:
+            gps_time = self._gps_time
+            rtp_timesnap = self._rtp_timesnap
 
         try:
             for chan in self.channel_manager.get_channels():
@@ -226,6 +235,16 @@ class ControlServer:
                 # OUTPUT_SSRC
                 buf.extend([StatusType.OUTPUT_SSRC, 4])
                 buf.extend(struct.pack(">I", ssrc & 0xFFFFFFFF))
+
+                # GPS_TIME — forwarded from upstream radiod
+                if gps_time is not None:
+                    buf.extend([StatusType.GPS_TIME, 8])
+                    buf.extend(struct.pack(">q", gps_time))
+
+                # RTP_TIMESNAP — forwarded from upstream radiod
+                if rtp_timesnap is not None:
+                    buf.extend([StatusType.RTP_TIMESNAP, 4])
+                    buf.extend(struct.pack(">I", rtp_timesnap & 0xFFFFFFFF))
 
                 # RADIO_FREQUENCY
                 buf.extend([StatusType.RADIO_FREQUENCY, 8])
@@ -270,3 +289,72 @@ class ControlServer:
         while self._running:
             self._broadcast_status_now()
             time.sleep(0.5)
+
+    # ------------------------------------------------------------------
+    # Upstream timing poller
+    # ------------------------------------------------------------------
+
+    def _get_upstream_status_addresses(self) -> List[str]:
+        """Return the status addresses of the engine's upstream radiod sources."""
+        addrs = []
+        for source in self.engine.sources.values():
+            if hasattr(source, "status_address") and source.status_address:
+                addrs.append(source.status_address)
+        return addrs
+
+    def _timing_poller_loop(self):
+        """Periodically poll upstream radiod sources for GPS_TIME / RTP_TIMESNAP.
+
+        The values are cached under ``_timing_lock`` and included in every
+        subsequent status broadcast so that downstream consumers (hf-timestd)
+        can correlate RTP timestamps with UTC.
+        """
+        from ka9q import discover_channels
+
+        logger.info("Timing poller started")
+
+        # Wait briefly for the engine to finish connecting before polling
+        time.sleep(2.0)
+
+        while self._running:
+            try:
+                addrs = self._get_upstream_status_addresses()
+                if not addrs:
+                    time.sleep(5.0)
+                    continue
+
+                # Poll the first (reference) source — all radiod instances
+                # share the same GPSDO so any source will have valid timing.
+                ref_addr = addrs[0]
+                channels = discover_channels(ref_addr, listen_duration=1.5)
+
+                best_gps = None
+                best_rtp = None
+                for _ssrc, info in channels.items():
+                    g = getattr(info, "gps_time", None)
+                    r = getattr(info, "rtp_timesnap", None)
+                    if g is not None and r is not None:
+                        best_gps = g
+                        best_rtp = r
+                        break  # One valid pair is sufficient
+
+                if best_gps is not None and best_rtp is not None:
+                    with self._timing_lock:
+                        changed = (self._gps_time != best_gps or
+                                   self._rtp_timesnap != best_rtp)
+                        self._gps_time = best_gps
+                        self._rtp_timesnap = best_rtp
+                    if changed:
+                        logger.info(
+                            f"Upstream timing updated: GPS_TIME={best_gps}, "
+                            f"RTP_TIMESNAP={best_rtp}"
+                        )
+                else:
+                    logger.debug(
+                        f"No GPS_TIME/RTP_TIMESNAP from upstream {ref_addr}"
+                    )
+
+            except Exception as e:
+                logger.warning(f"Timing poller error: {e}")
+
+            time.sleep(2.0)
