@@ -3,6 +3,16 @@
 Date: 2026-03-01
 Version: 0.1.0
 
+> **Superseded in part (2026-10-06)** by [MULTI_ANTENNA_PHASING_PLAN.md](MULTI_ANTENNA_PHASING_PLAN.md).
+> Three claims below do not hold. A shared reference fixes the sample rate, not the
+> sampling instant: each RX888 synthesizes its own ADC clock. Each radiod counts samples
+> from its own start, so receivers do not share a sample origin. On radiod's 200 Hz grid
+> a channel's phase follows the absolute sample count rather than randomizing at each
+> channel start (to be confirmed at runtime). Signal-based alignment, described below,
+> also absorbs the arrival-direction phase, so it supports diversity combining but not
+> steering, nulling or direction finding. The continuous EMA alignment described here
+> was removed from the code in v1.3.0.
+
 This document describes the theoretical and methodological parameters `phase-engine` uses to guarantee absolute phase coherence across an array of independent SDRs (specifically `ka9q-radio` using RX888 hardware).
 
 ## The NCO Phase Ambiguity Problem
