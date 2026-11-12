@@ -28,7 +28,7 @@ dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
     "toml>=0.10",
-    "ka9q-python @ git+https://github.com/mijahauan/ka9q-python.git"
+    "ka9q-python @ git+https://github.com/HamSCI/ka9q-python.git@v3.27.0"
 ]
 
 [project.optional-dependencies]
